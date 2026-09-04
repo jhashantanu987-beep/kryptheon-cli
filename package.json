@@ -36,5 +36,13 @@
     "testing",
     "end-to-end",
     "cli"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jhashantanu987-beep/kryptheon-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jhashantanu987-beep/kryptheon-cli/issues"
+  },
+  "homepage": "https://github.com/jhashantanu987-beep/kryptheon-cli#readme"
 }

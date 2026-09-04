@@ -1,0 +1,10 @@
+# Local credentials - never commit
+.env
+.env.local
+# Generated
+node_modules/
+test-results/
+playwright-report/
+kryptheon-history.jsonl
+kryptheon-baselines.json
+*.tgz

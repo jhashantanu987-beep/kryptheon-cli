@@ -1,0 +1,40 @@
+{
+  "name": "kryptheon",
+  "version": "0.1.3",
+  "description": "Record what you do in your app and get plain-language reports when it breaks.",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "kryptheon": "bin/kryptheon.js"
+  },
+  "exports": {
+    ".": "./kryptheon-fixture.js",
+    "./kryptheon-fixture": "./kryptheon-fixture.js",
+    "./kryptheon-reporter": "./kryptheon-reporter.js",
+    "./package.json": "./package.json",
+    "./kryptheon-replay": "./kryptheon-replay.js"
+  },
+  "files": [
+    "bin/",
+    "kryptheon-fixture.js",
+    "kryptheon-reporter.js",
+    "playwright.config.js",
+    "README.md",
+    "kryptheon-replay.js"
+  ],
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.62.1"
+  },
+  "scripts": {
+    "check": "node kryptheon-reporter.check.js"
+  },
+  "keywords": [
+    "playwright",
+    "testing",
+    "end-to-end",
+    "cli"
+  ]
+}

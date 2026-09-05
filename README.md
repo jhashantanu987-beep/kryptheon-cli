@@ -6,8 +6,6 @@ plain English what broke.
 Runs entirely on your machine. No account, no API key, nothing leaves your
 computer. It is a wrapper around [Playwright](https://playwright.dev).
 
-
-
 ## Install
 
 ```

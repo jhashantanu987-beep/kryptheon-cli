@@ -534,6 +534,50 @@ function scratchFile(contents) {
   return file;
 }
 
+// Loads a fresh reporter with quiet mode on, drives a whole run through it,
+// and returns everything it printed. The flag is read at module load, so the
+// module cache has to be cleared for it to take effect.
+function runReporterQuiet(tests) {
+  const reporterPath = nodePath.join(__dirname, 'kryptheon-reporter.js');
+  const hadQuiet = process.env.KRYPTHEON_QUIET;
+  process.env.KRYPTHEON_QUIET = '1';
+  delete require.cache[require.resolve(reporterPath)];
+
+  let printed = '';
+  const realWrite = process.stdout.write.bind(process.stdout);
+  try {
+    const QuietReporter = require(reporterPath);
+    const reporter = new QuietReporter();
+    reporter.previousRuns = [];
+    reporter.records = [];
+
+    process.stdout.write = (chunk) => {
+      printed += chunk;
+      return true;
+    };
+    reporter.onBegin();
+    for (const t of tests) {
+      reporter.onTestEnd(
+        { title: t.title },
+        {
+          status: t.status,
+          duration: t.duration,
+          startTime: new Date(),
+          errors: t.errors || [],
+          attachments: [],
+        }
+      );
+    }
+    reporter.onEnd({ status: tests.some((t) => t.status !== 'passed') ? 'failed' : 'passed' });
+  } finally {
+    process.stdout.write = realWrite;
+    delete require.cache[require.resolve(reporterPath)];
+    if (hadQuiet === undefined) delete process.env.KRYPTHEON_QUIET;
+    else process.env.KRYPTHEON_QUIET = hadQuiet;
+  }
+  return printed;
+}
+
 const KEY = 'tests/login.spec.js :: Login';
 const DASHBOARD = { url: '/dashboard.html', title: 'Catchai | Clinic Dashboard' };
 
@@ -1095,6 +1139,138 @@ const baselineCases = [
       } catch (err) {
         /* best effort */
       }
+      return problems;
+    },
+  },
+  // --- Quiet mode. The flag is read when the module loads, so these load a
+  // --- fresh copy of the reporter with the flag set.
+  {
+    name: 'a whole passing run says one line and nothing else',
+    run: () => {
+      const printed = runReporterQuiet([
+        { title: 'Sign in', status: 'passed', duration: 1200 },
+        { title: 'Checkout', status: 'passed', duration: 900 },
+      ]);
+      const lines = printed.split('\n').filter((l) => l.trim().length);
+      const problems = [];
+      if (lines.length !== 1) {
+        problems.push('expected exactly one line, got ' + lines.length + ': ' + JSON.stringify(lines));
+      }
+      if (printed.indexOf('Kryptheon test run') !== -1) problems.push('the header was printed');
+      if (printed.indexOf('Sign in') !== -1) problems.push('a per-test line was printed');
+      if (lines[0] && lines[0].indexOf('2 recordings') === -1) {
+        problems.push('the one line does not say how many: ' + lines[0]);
+      }
+      return problems;
+    },
+  },
+  {
+    name: 'a failing run in quiet mode still explains itself fully',
+    run: () => {
+      const printed = runReporterQuiet([
+        { title: 'Sign in', status: 'passed', duration: 1200 },
+        {
+          title: 'Checkout',
+          status: 'failed',
+          duration: 4000,
+          errors: [
+            {
+              message:
+                'TimeoutError: locator.click: Timeout 4000ms exceeded.\nCall log:\n' +
+                '  - waiting for getByRole(\'button\', { name: \'Place order\' })\n',
+            },
+          ],
+        },
+      ]);
+      const problems = [];
+      if (printed.indexOf('Could not find the button "Place order"') === -1) {
+        problems.push('the plain-language reason is missing');
+      }
+      if (printed.indexOf('Paste this into your AI tool:') === -1) {
+        problems.push('the pasteable prompt is missing');
+      }
+      if (printed.indexOf('Sign in') !== -1) problems.push('the passing test was still announced');
+      // Quiet only replaces the closing line when nothing failed; a failing
+      // run still has to say how many broke.
+      if (printed.indexOf('1 working, 1 broken') === -1) {
+        problems.push('the closing count is missing on a failing run');
+      }
+      return problems;
+    },
+  },
+
+  // --- The rules file that tells an assistant to check its own work.
+  {
+    name: 'the rule is written into a file that did not exist',
+    run: () => {
+      const cli = require('./bin/kryptheon.js');
+      const out = cli.applyRules(null, 'html');
+      const problems = [];
+      if (out.action !== 'created') problems.push('expected "created", got ' + out.action);
+      if (out.contents.indexOf('npx kryptheon check') === -1) problems.push('the command is not in the rule');
+      if (out.contents.indexOf('kryptheon:start') === -1) problems.push('no opening marker');
+      if (out.contents.indexOf('kryptheon:end') === -1) problems.push('no closing marker');
+      return problems;
+    },
+  },
+  {
+    name: 'an existing file keeps everything it already had',
+    run: () => {
+      const cli = require('./bin/kryptheon.js');
+      const mine = '# My project\n\nAlways use tabs.\nNever touch src/legacy.\n';
+      const out = cli.applyRules(mine, 'html');
+      const problems = [];
+      if (out.action !== 'appended') problems.push('expected "appended", got ' + out.action);
+      if (out.contents.indexOf('Always use tabs.') === -1) problems.push('existing content was lost');
+      if (out.contents.indexOf('Never touch src/legacy.') === -1) problems.push('existing content was lost');
+      if (out.contents.indexOf('# My project') !== 0) problems.push('the file no longer starts as it did');
+      if (out.contents.indexOf('npx kryptheon check') === -1) problems.push('the rule was not added');
+      return problems;
+    },
+  },
+  {
+    name: 'running it twice does not stack a second copy',
+    run: () => {
+      const cli = require('./bin/kryptheon.js');
+      const once = cli.applyRules('# Mine\n\nkeep me\n', 'html').contents;
+      const twice = cli.applyRules(once, 'html');
+      const problems = [];
+      const count = twice.contents.split('kryptheon:start').length - 1;
+      if (count !== 1) problems.push('the marked section appears ' + count + ' times');
+      if (twice.contents.indexOf('keep me') === -1) problems.push('existing content was lost on the second run');
+      if (twice.action === 'appended') problems.push('a second run appended instead of replacing');
+      return problems;
+    },
+  },
+  {
+    name: 'the rule covers the case where nothing is recorded yet',
+    run: () => {
+      const cli = require('./bin/kryptheon.js');
+      const block = cli.rulesBlock('html');
+      const flat = block.replace(/\s+/g, ' ');
+      const problems = [];
+      if (flat.indexOf('npx kryptheon record') === -1) {
+        problems.push('the rule never mentions how to record');
+      }
+      if (flat.indexOf('their own terminal') === -1) {
+        problems.push('the rule does not say the user must do it themselves');
+      }
+      if (flat.indexOf('do not try to fix it') === -1) {
+        problems.push('the rule does not say this is not something to fix');
+      }
+      return problems;
+    },
+  },
+  {
+    name: 'the plain-text format is commented, not left as markdown',
+    run: () => {
+      const cli = require('./bin/kryptheon.js');
+      const block = cli.rulesBlock('hash');
+      const problems = [];
+      const lines = block.split('\n').filter((l) => l.length);
+      const uncommented = lines.filter((l) => l.charAt(0) !== '#');
+      if (uncommented.length) problems.push('lines without a comment marker: ' + JSON.stringify(uncommented.slice(0, 2)));
+      if (block.indexOf('npx kryptheon check') === -1) problems.push('the command is missing');
       return problems;
     },
   },

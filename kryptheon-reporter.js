@@ -5,6 +5,10 @@
 const fs = require('fs');
 const path = require('path');
 
+// An assistant runs this after every change, so it needs a mode that says
+// nothing at all when the news is good.
+const QUIET = !!process.env.KRYPTHEON_QUIET;
+
 // The history belongs to whoever is running the tests, so it lives in their
 // folder - not inside the installed package.
 const USER_DIR = process.cwd();
@@ -571,7 +575,9 @@ class KryptheonReporter {
     // Read history before this run is appended, so "was working on" looks
     // only at genuinely earlier runs.
     this.previousRuns = this._readHistory();
-    process.stdout.write('\nKryptheon test run - ' + formatWhen(this.startedAt.toISOString()) + '\n\n');
+    if (!QUIET) {
+      process.stdout.write('\nKryptheon test run - ' + formatWhen(this.startedAt.toISOString()) + '\n\n');
+    }
   }
 
   _readHistory() {
@@ -642,7 +648,9 @@ class KryptheonReporter {
 
     if (status === 'passed') {
       this.records.push(record);
-      process.stdout.write('OK  ' + test.title + '  (' + formatDuration(result.duration) + ')\n');
+      if (!QUIET) {
+        process.stdout.write('OK  ' + test.title + '  (' + formatDuration(result.duration) + ')\n');
+      }
       return;
     }
 
@@ -767,6 +775,12 @@ class KryptheonReporter {
       fs.appendFileSync(HISTORY_FILE, JSON.stringify(entry) + '\n', 'utf8');
     } catch (err) {
       process.stdout.write('\n(could not write ' + path.basename(HISTORY_FILE) + ': ' + err.message + ')\n');
+    }
+
+    if (QUIET && !failed) {
+      const s = passed === 1 ? '' : 's';
+      process.stdout.write('OK  ' + passed + ' recording' + s + ' still working.\n');
+      return;
     }
 
     process.stdout.write(

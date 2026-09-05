@@ -62,6 +62,35 @@ A recording is only useful if it still works the second time. So:
 
 Kryptheon warns you about these after a recording, and names the exact step.
 
+## Make your AI assistant check its own work
+
+An assistant will happily call a change done after only reading the code. This
+writes a rule into the files assistants already read, so it has to run the check
+first:
+
+```
+npx kryptheon setup-ai
+```
+
+It writes `CLAUDE.md`, `AGENTS.md` and `.cursorrules`. If a file already exists,
+it adds a marked section at the end rather than overwriting anything, and
+running it again replaces that section instead of adding a second copy.
+
+The rule: after any change, run `npx kryptheon check`, show the output, and do
+not report the work as done until it passes.
+
+For an assistant running the check after every change, `--quiet` keeps the
+conversation readable — one line when everything passes, the full explanation
+only when something breaks:
+
+```
+npx kryptheon check --quiet
+```
+
+```
+OK  3 recordings still working.
+```
+
 ## Automatic checks
 
 The first time a test passes, kryptheon remembers where the browser ended up and

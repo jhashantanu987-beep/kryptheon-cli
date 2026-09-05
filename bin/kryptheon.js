@@ -40,6 +40,9 @@ function usage() {
   console.log('  kryptheon record <url>   open your app and record what you do as a test');
   console.log('  kryptheon check          run every recorded test and report in plain language');
   console.log('  kryptheon accept <name>  agree that one test\'s new result is the correct one');
+  console.log('  kryptheon setup-ai       tell your AI assistant to check its work');
+  console.log('');
+  console.log('  add --quiet to check for one line when everything passes');
   console.log('');
 }
 
@@ -911,17 +914,25 @@ function triageSpecs() {
   };
 }
 
-function check() {
+function check(options) {
+  const quiet = !!(options && options.quiet);
+  // Deliberately not a failure. An assistant told to run this after every
+  // change will read a non-zero exit as "something broke" and start fixing
+  // code that is perfectly fine. Nothing has been recorded, so there is
+  // nothing to verify and nothing to repair.
   if (!listSpecFiles().length) {
     console.log('');
-    console.log('  There is nothing to check yet.');
+    console.log('  Nothing has been recorded yet, so there is nothing to check.');
     console.log('');
-    console.log('  Record something first, for example:');
-    console.log('    kryptheon record https://www.example.com');
+    console.log('  This is not a failure, and there is nothing in the code to fix.');
     console.log('');
-    console.log('  Use your app in the browser that opens, then close it.');
+    console.log('  To start, record a flow through the app:');
+    console.log('    npx kryptheon record <url>');
     console.log('');
-    return 1;
+    console.log('  That opens a browser window, so it has to be run by a person in');
+    console.log('  a normal terminal - it cannot be done from an AI assistant.');
+    console.log('');
+    return 0;
   }
   if (!fixtureResolvesForUser() && specsNeedThePackage()) {
     console.log('');
@@ -974,6 +985,7 @@ function check() {
   // Only the usable recordings are handed to the test runner, so a file that
   // cannot produce diagnostics can never be counted as passing.
   const only = triage.runnable.map((name) => path.join('tests', name).split(path.sep).join('/'));
+  if (quiet) process.env.KRYPTHEON_QUIET = '1';
   const status = runPlaywright(['test', '--config', CONFIG].concat(only)).status;
 
   // Without this, a green summary could still hide a recording that checked
@@ -987,6 +999,120 @@ function check() {
     console.log('');
   }
   return status;
+}
+
+// --- setup-ai ---------------------------------------------------------------
+//
+// An assistant that only reads code will happily call a change finished. These
+// files are the ones the common assistants read on their own, so the rule ends
+// up in front of them without anyone having to remember it.
+
+const RULES_START = 'kryptheon:start';
+const RULES_END = 'kryptheon:end';
+
+// Every assistant reads at least one of these.
+const RULES_TARGETS = [
+  { file: 'CLAUDE.md', comment: 'html' },
+  { file: 'AGENTS.md', comment: 'html' },
+  { file: '.cursorrules', comment: 'hash' },
+];
+
+function rulesBody() {
+  return [
+    '## Checking your work with kryptheon',
+    '',
+    'After making any change to this app:',
+    '',
+    '1. Run `npx kryptheon check` and show its output.',
+    '2. Do not report the work as done until it passes.',
+    '3. If it fails, fix what broke and run it again.',
+    '4. If it says nothing has been recorded yet, stop and ask the user to run',
+    '   `npx kryptheon record <url>` themselves in their own terminal. That',
+    '   opens a browser window and cannot be done from your terminal. It is not',
+    '   a failure, so do not try to fix it.',
+    '',
+    'Reading the code is not enough. The check runs the app in a real browser,',
+    'which is the only thing that shows whether the change actually works.',
+  ];
+}
+
+// Wrapped in markers so a second run replaces the block instead of stacking
+// another copy underneath the first.
+function rulesBlock(style) {
+  const open = style === 'hash' ? '# ' + RULES_START : '<!-- ' + RULES_START + ' -->';
+  const close = style === 'hash' ? '# ' + RULES_END : '<!-- ' + RULES_END + ' -->';
+  const body = style === 'hash' ? rulesBody().map((l) => (l ? '# ' + l : '#')) : rulesBody();
+  return [open].concat(body, [close]).join('\n');
+}
+
+// Returns the new contents, and what happened, without touching the disk.
+function applyRules(existing, style) {
+  const block = rulesBlock(style);
+  if (existing === null || existing === undefined) {
+    return { contents: block + '\n', action: 'created' };
+  }
+  const text = String(existing);
+  const startAt = text.indexOf(RULES_START);
+  const endAt = text.indexOf(RULES_END);
+
+  if (startAt !== -1 && endAt !== -1 && endAt > startAt) {
+    // Replace the previous block, keeping everything around it.
+    const lines = text.split('\n');
+    const first = lines.findIndex((l) => l.indexOf(RULES_START) !== -1);
+    let last = lines.findIndex((l) => l.indexOf(RULES_END) !== -1);
+    if (first === -1 || last === -1 || last < first) return { contents: text, action: 'unchanged' };
+    const rebuilt = lines.slice(0, first).concat(block.split('\n'), lines.slice(last + 1));
+    const contents = rebuilt.join('\n');
+    return { contents: contents, action: contents === text ? 'unchanged' : 'updated' };
+  }
+
+  // Never overwrite what someone else wrote: add to the end.
+  const padded = text.replace(/\s*$/, '');
+  return { contents: padded + '\n\n' + block + '\n', action: 'appended' };
+}
+
+function setupAi() {
+  const results = [];
+  for (const target of RULES_TARGETS) {
+    const full = path.join(USER_DIR, target.file);
+    let existing = null;
+    try {
+      existing = fs.readFileSync(full, 'utf8');
+    } catch (err) {
+      existing = null;
+    }
+    const outcome = applyRules(existing, target.comment);
+    if (outcome.action === 'unchanged') {
+      results.push({ file: target.file, action: 'unchanged' });
+      continue;
+    }
+    try {
+      fs.writeFileSync(full, outcome.contents, 'utf8');
+      results.push({ file: target.file, action: outcome.action });
+    } catch (err) {
+      results.push({ file: target.file, action: 'failed' });
+    }
+  }
+
+  console.log('');
+  console.log('  Your AI assistant now has a rule to check its work.');
+  console.log('');
+  for (const r of results) {
+    const said =
+      r.action === 'created' ? 'written'
+      : r.action === 'appended' ? 'added a section to your existing file'
+      : r.action === 'updated' ? 'updated the section it wrote before'
+      : r.action === 'unchanged' ? 'already up to date'
+      : 'could not be written';
+    console.log('    ' + r.file.padEnd(14) + said);
+  }
+  console.log('');
+  console.log('  The rule: after any change, run "npx kryptheon check", show the');
+  console.log('  output, and do not call the work done until it passes.');
+  console.log('');
+  console.log('  Nothing outside the marked section was touched.');
+  console.log('');
+  return results.some((r) => r.action === 'failed') ? 1 : 0;
 }
 
 // --- accept -----------------------------------------------------------------
@@ -1131,8 +1257,10 @@ async function main() {
       return finishWith(await record(rest[0]));
       break;
     case 'check':
-      return finishWith(check());
+      return finishWith(check({ quiet: rest.indexOf('--quiet') !== -1 || rest.indexOf('-q') !== -1 }));
       break;
+    case 'setup-ai':
+      return finishWith(setupAi());
     case 'accept':
       return finishWith(accept(rest.join(' ').trim()));
       break;
@@ -1164,6 +1292,8 @@ module.exports = {
   isRealRecording: isRealRecording,
   importsPlaywrightDirectly: importsPlaywrightDirectly,
   triageSpecs: triageSpecs,
+  applyRules: applyRules,
+  rulesBlock: rulesBlock,
   record: record,
   finaliseRecording: finaliseRecording,
   takeOutSecrets: takeOutSecrets,

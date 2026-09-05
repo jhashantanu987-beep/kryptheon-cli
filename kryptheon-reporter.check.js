@@ -897,28 +897,47 @@ const baselineCases = [
     },
   },
   {
-    name: 'a screen-less terminal is noticed before launching anything',
+    name: 'recording is never refused before the browser is tried',
+    run: () => {
+      // A real user in Command Prompt was refused because stdout.isTTY came
+      // back falsy, and told to go and run the command they had just run.
+      // Nothing may gate the launch on a guess about the terminal.
+      const source = fs.readFileSync(nodePath.join(__dirname, 'bin', 'kryptheon.js'), 'utf8');
+      const problems = [];
+
+      const beforeRecord = source.split('async function record(url)')[1] || '';
+      const upToLaunch = beforeRecord.split('startCodegen')[0] || '';
+      if (/isTTY/.test(upToLaunch)) {
+        problems.push('something still inspects isTTY before launching the browser');
+      }
+      if (/looksLikeNoDesktop/.test(source)) {
+        problems.push('the terminal-guessing refusal is still present');
+      }
+      return problems;
+    },
+  },
+  {
+    name: 'the no-window message does not repeat back what was just run',
     run: () => {
       const cli = require('./bin/kryptheon.js');
+      const text = cli.noWindowLines(30).join('\n');
       const problems = [];
-      const realTty = process.stdout.isTTY;
-      const realForce = process.env.KRYPTHEON_FORCE_RECORD;
-      try {
-        delete process.env.KRYPTHEON_FORCE_RECORD;
 
-        process.stdout.isTTY = undefined; // an AI assistant's terminal
-        if (!cli.looksLikeNoDesktop()) problems.push('a window-less terminal was not noticed');
-
-        process.stdout.isTTY = true; // a real terminal window
-        if (cli.looksLikeNoDesktop()) problems.push('a real terminal was wrongly refused');
-
-        process.stdout.isTTY = undefined;
-        process.env.KRYPTHEON_FORCE_RECORD = '1';
-        if (cli.looksLikeNoDesktop()) problems.push('the override did not take effect');
-      } finally {
-        process.stdout.isTTY = realTty;
-        if (realForce === undefined) delete process.env.KRYPTHEON_FORCE_RECORD;
-        else process.env.KRYPTHEON_FORCE_RECORD = realForce;
+      // Telling someone in Command Prompt to open Command Prompt and run the
+      // same command is the dead end this replaced.
+      if (/Open Command Prompt/i.test(text)) problems.push('it still tells them to open a terminal');
+      if (/^\s*npx kryptheon record/m.test(text)) {
+        problems.push('it still hands back the command they just ran');
+      }
+      if (text.indexOf('No browser window appeared') === -1) {
+        problems.push('it does not say plainly what happened');
+      }
+      // It has to be clear this was tried, not assumed.
+      if (!/browser was started/i.test(text)) {
+        problems.push('it does not make clear the browser was actually launched');
+      }
+      if (text.indexOf('KRYPTHEON_FORCE_RECORD') === -1) {
+        problems.push('there is no way out for someone whose window is real');
       }
       return problems;
     },

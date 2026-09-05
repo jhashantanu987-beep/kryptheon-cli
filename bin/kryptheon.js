@@ -479,23 +479,51 @@ async function nameRecording(relativeFile) {
 // Recording needs a real browser window on someone's screen. Inside an AI
 // coding assistant there is no desktop to draw it on, so codegen would sit
 // there forever and the run would be killed before anything was tidied up.
-function looksLikeNoDesktop() {
-  if (process.env.KRYPTHEON_FORCE_RECORD) return false;
-  return !process.stdout.isTTY;
+// There is deliberately no up-front refusal here.
+//
+// This used to check process.stdout.isTTY and refuse before launching. That
+// was wrong: isTTY is falsy in plenty of perfectly good terminals depending on
+// how the process was started, and a real user in Command Prompt was told to
+// go and run the command in Command Prompt. Refusing on a guess is far worse
+// than trying and waiting - so we always launch, and the watchdog below
+// reports only when a window genuinely never appears.
+
+// Only ever shown after actually trying: the browser was launched and no
+// window arrived. It must never tell someone to go and run the command they
+// have plainly just run.
+function noWindowLines(seconds) {
+  return [
+    '',
+    '  No browser window appeared.',
+    '',
+    '  The browser was started, but nothing showed up on screen within ' + seconds,
+    '  seconds, so there was nowhere to record.',
+    '',
+    '  The usual reasons:',
+    '    - there is no desktop to draw on - a remote or SSH session, a',
+    '      container, or an AI coding assistant running the command for you',
+    '    - security software stopped the browser from opening',
+    '    - the machine is slow and the browser had not finished starting',
+    '',
+    '  If you are sitting at the screen, run the same command again - a slow',
+    '  first start is the most common cause, and the second attempt usually',
+    '  works.',
+    '',
+    '  If you are connected to a different machine, run it on the machine',
+    '  that has the screen.',
+    '',
+    '  If the window really is open and this keeps happening, set',
+    '  KRYPTHEON_FORCE_RECORD=1 to skip this check.',
+    '',
+    '  Nothing was recorded.',
+    '',
+  ];
 }
 
-function explainNoWindow(url) {
-  console.error('');
-  console.error('  Recording needs a real browser window on your screen.');
-  console.error('');
-  console.error('  This terminal cannot show one - that is what happens inside an');
-  console.error('  AI coding assistant, or any window-less session.');
-  console.error('');
-  console.error('  Open Command Prompt (or PowerShell) yourself and run:');
-  console.error('    npx kryptheon record ' + url);
-  console.error('');
-  console.error('  Nothing was recorded.');
-  console.error('');
+function explainNoWindow() {
+  for (const line of noWindowLines(Math.round(WINDOW_TIMEOUT_MS / 1000))) {
+    console.error(line);
+  }
 }
 
 // Is a Playwright-controlled browser actually showing a window?
@@ -693,7 +721,7 @@ async function finaliseRecording(outFile, context) {
   }
 
   if (ctx.reason === 'no-window') {
-    explainNoWindow(ctx.target);
+    explainNoWindow();
   } else if (ctx.reason === 'signal') {
     console.log('');
     console.log('  Recording stopped before anything was saved.');
@@ -725,13 +753,6 @@ async function record(url) {
   }
 
   const target = normaliseRecordUrl(url);
-
-  // No desktop means no window means nothing to record. Say so now rather
-  // than hanging until something kills us.
-  if (looksLikeNoDesktop()) {
-    explainNoWindow(target);
-    return 1;
-  }
 
   // Fail early and kindly rather than letting codegen throw a stack trace.
   const reach = await reachability(target);
@@ -793,8 +814,14 @@ async function record(url) {
 
   return await new Promise((resolve) => {
     // If no window ever appears, stop instead of waiting for someone to kill us.
+    // Someone whose window is real but undetectable can turn this off.
+    const watchdogOff = !!process.env.KRYPTHEON_FORCE_RECORD;
     let waited = 0;
     const watchdog = setInterval(() => {
+      if (watchdogOff) {
+        clearInterval(watchdog);
+        return;
+      }
       waited += WINDOW_POLL_MS;
       if (browserWindowIsUp()) {
         clearInterval(watchdog);
@@ -1299,7 +1326,7 @@ module.exports = {
   takeOutSecrets: takeOutSecrets,
   reportReplayRisks: reportReplayRisks,
   offerToDropLogout: offerToDropLogout,
-  looksLikeNoDesktop: looksLikeNoDesktop,
+  noWindowLines: noWindowLines,
   classifyFetchError: classifyFetchError,
   normaliseRecordUrl: normaliseRecordUrl,
   isLocalAddress: isLocalAddress,

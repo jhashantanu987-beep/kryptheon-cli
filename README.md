@@ -123,9 +123,11 @@ Worth adding to `.gitignore`: `.env`, `kryptheon-baselines.json`,
 
 ## Requirements
 
-Node 20.6 or later. Recording needs a real terminal window — it opens a browser,
-so it cannot run inside an AI coding assistant. The first run downloads a browser
-(about 200MB, once).
+Node 20.6 or later. The first run downloads a browser (about 200MB, once).
+
+Recording opens a browser window, so it needs a machine with a screen. It will
+always try — if no window appears within 30 seconds it stops and says so,
+rather than refusing up front.
 
 ## Licence
 

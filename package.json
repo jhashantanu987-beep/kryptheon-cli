@@ -12,12 +12,14 @@
     "./kryptheon-fixture": "./kryptheon-fixture.js",
     "./kryptheon-reporter": "./kryptheon-reporter.js",
     "./package.json": "./package.json",
-    "./kryptheon-replay": "./kryptheon-replay.js"
+    "./kryptheon-replay": "./kryptheon-replay.js",
+    "./kryptheon-signature": "./kryptheon-signature.js"
   },
   "files": [
     "bin/",
     "kryptheon-fixture.js",
     "kryptheon-reporter.js",
+    "kryptheon-signature.js",
     "playwright.config.js",
     "README.md",
     "kryptheon-replay.js"
@@ -29,7 +31,8 @@
     "@playwright/test": "^1.62.1"
   },
   "scripts": {
-    "check": "node kryptheon-reporter.check.js"
+    "check": "node kryptheon-reporter.check.js && node kryptheon-signature.check.js && node kryptheon-signature.stream.check.js",
+    "check:stream": "node kryptheon-signature.stream.check.js"
   },
   "keywords": [
     "playwright",

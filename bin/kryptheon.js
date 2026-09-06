@@ -11,6 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const os = require('os');
 const replay = require('../kryptheon-replay.js');
 
 const PACKAGE_DIR = path.join(__dirname, '..');
@@ -33,6 +34,16 @@ function nodeIsTooOld(version) {
   return false;
 }
 
+// Read from the package rather than repeated here, so it cannot go stale.
+// Someone filing a bug report has to be able to say which version they have.
+function packageVersion() {
+  try {
+    return require(path.join(PACKAGE_DIR, 'package.json')).version || 'unknown';
+  } catch (err) {
+    return 'unknown';
+  }
+}
+
 function usage() {
   console.log('');
   console.log('  kryptheon - record and check your app');
@@ -43,6 +54,7 @@ function usage() {
   console.log('  kryptheon setup-ai       tell your AI assistant to check its work');
   console.log('');
   console.log('  add --quiet to check for one line when everything passes');
+  console.log('  kryptheon --version      print the version you have installed');
   console.log('');
 }
 
@@ -1013,7 +1025,22 @@ function check(options) {
   // cannot produce diagnostics can never be counted as passing.
   const only = triage.runnable.map((name) => path.join('tests', name).split(path.sep).join('/'));
   if (quiet) process.env.KRYPTHEON_QUIET = '1';
+
+  // Debug signatures. The workers cannot print: Playwright pipes their
+  // descriptors and hands the output to reporter stdio hooks that this
+  // reporter does not implement, so it is dropped. They write to this file
+  // instead and it is printed here, on stderr, where the reporter's own
+  // output on stdout is left completely alone.
+  const signatures = require(path.join(PACKAGE_DIR, 'kryptheon-signature.js'));
+  let sink = null;
+  if (signatures.signatureEnabled()) {
+    sink = path.join(os.tmpdir(), 'kryptheon-signature-' + process.pid + '.jsonl');
+    process.env[signatures.SINK_ENV] = sink;
+  }
+
   const status = runPlaywright(['test', '--config', CONFIG].concat(only)).status;
+
+  if (sink) signatures.drainSignatures(sink);
 
   // Without this, a green summary could still hide a recording that checked
   // nothing at all.
@@ -1291,6 +1318,11 @@ async function main() {
     case 'accept':
       return finishWith(accept(rest.join(' ').trim()));
       break;
+    case '-v':
+    case '--version':
+    case 'version':
+      console.log(packageVersion());
+      return finishWith(0);
     case undefined:
     case '-h':
     case '--help':
@@ -1308,6 +1340,7 @@ async function main() {
 
 // Exported so the naming logic can be checked without opening a browser.
 module.exports = {
+  packageVersion: packageVersion,
   humanisePath: humanisePath,
   nameFromTitle: nameFromTitle,
   deriveTestName: deriveTestName,

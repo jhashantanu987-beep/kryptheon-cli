@@ -20,6 +20,7 @@ const base = require('@playwright/test');
 // Reuse the reporter's host-stripping so a baseline stores exactly the shape
 // the reporter prints.
 const { requestPath } = require('./kryptheon-reporter.js');
+const signature = require('./kryptheon-signature.js');
 
 const MAX_ITEMS = 5; // keep the failure block readable
 
@@ -272,6 +273,21 @@ const test = base.test.extend({
     };
 
     await use(page);
+
+    // Step one of the DOM signature: read the page, for both passing and
+    // failing tests, and hand it to the CLI to print. Nothing is stored in a
+    // baseline, nothing is compared, and nothing here can change the outcome -
+    // collection does not even run unless the flag is set, so with it off this
+    // is a single string compare.
+    //
+    // Handed over through a file rather than printed. Playwright pipes this
+    // worker's descriptors and gives whatever comes out to the reporter's stdio
+    // hooks, which kryptheon's reporter does not implement, so anything printed
+    // from here is collected and dropped before it can reach a terminal.
+    if (signature.signatureEnabled()) {
+      const captured = await signature.collectSignature(page, failedRequests);
+      signature.recordSignature(testInfo.title, captured);
+    }
 
     // The test's own assertions decide first. A test that already failed keeps
     // its own error, and never contributes a baseline.

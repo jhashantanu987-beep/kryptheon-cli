@@ -167,6 +167,88 @@ const cases = [
     },
   },
   {
+    name: 'reordering the same items is not a difference',
+    run: () => {
+      const before = sig.buildSignature({
+        headings: ['Your workspace', 'Recent activity'],
+        actions: ['Sign out', 'Settings'],
+        fields: ['Email', 'Password'],
+      });
+      const after = sig.buildSignature({
+        headings: ['Recent activity', 'Your workspace'],
+        actions: ['Settings', 'Sign out'],
+        fields: ['Password', 'Email'],
+      });
+      const message = sig.compareSignatures(before, after);
+      return message === null ? [] : ['reported a change for a reorder:' + message];
+    },
+  },
+  {
+    name: 'a number moving is not a difference',
+    run: () => {
+      const before = sig.buildSignature({ headings: ['Savings Rate 0%'] });
+      const after = sig.buildSignature({ headings: ['Savings Rate 12%'] });
+      const message = sig.compareSignatures(before, after);
+      return message === null ? [] : ['reported a change for a moving number:' + message];
+    },
+  },
+  {
+    name: 'a page that swapped its content is a difference, and says what moved',
+    run: () => {
+      const before = sig.buildSignature({ headings: ['Your workspace'], actions: ['Sign out'] });
+      const after = sig.buildSignature({ headings: ['Sign in'], fields: ['Password'] });
+      const message = sig.compareSignatures(before, after);
+      if (!message) return ['no change was reported'];
+      const problems = [];
+      if (!/ended up somewhere different than before/.test(message)) problems.push('wrong headline: ' + message.split(String.fromCharCode(10))[0]);
+      if (!/Headings that are gone: "Your workspace"/.test(message)) problems.push('does not name the missing heading');
+      if (!/Headings that are new: "Sign in"/.test(message)) problems.push('does not name the new heading');
+      if (!/Buttons and links that are gone: "Sign out"/.test(message)) problems.push('does not name the missing button');
+      if (!/Form fields that are new: "Password"/.test(message)) problems.push('does not name the new field');
+      return problems;
+    },
+  },
+  {
+    name: 'a newly failing request is a difference',
+    run: () => {
+      const before = sig.buildSignature({ headings: ['Dashboard'] });
+      const after = sig.buildSignature({
+        headings: ['Dashboard'],
+        failedRequests: [{ method: 'POST', url: 'https://x.test/api/login?t=1', status: 401 }],
+      });
+      const message = sig.compareSignatures(before, after);
+      if (!message) return ['a new 401 was not reported'];
+      return message.indexOf('Requests that failed this time: POST /api/login 401') !== -1
+        ? []
+        : ['unexpected wording: ' + message];
+    },
+  },
+  {
+    name: 'a request that used to fail and now does not is never a difference',
+    run: () => {
+      const before = sig.buildSignature({
+        headings: ['Dashboard'],
+        failedRequests: [{ method: 'GET', url: 'https://x.test/api/flaky', status: 500 }],
+      });
+      const after = sig.buildSignature({ headings: ['Dashboard'] });
+      const message = sig.compareSignatures(before, after);
+      return message === null ? [] : ['a fixed request was reported as a regression:' + message];
+    },
+  },
+  {
+    name: 'a missing signature on either side is never a difference',
+    run: () => {
+      const real = sig.buildSignature({ headings: ['Dashboard'] });
+      const problems = [];
+      // An old baseline, recorded before signatures existed.
+      if (sig.compareSignatures(undefined, real) !== null) problems.push('an old baseline was treated as a change');
+      // A run whose capture failed knows nothing about the page.
+      if (sig.compareSignatures(real, null) !== null) problems.push('a failed capture was treated as a change');
+      if (sig.compareSignatures(null, null) !== null) problems.push('two absences were treated as a change');
+      return problems;
+    },
+  },
+  {
     name: 'printing a missing signature says so instead of throwing',
     run: () => {
       const lines = [];

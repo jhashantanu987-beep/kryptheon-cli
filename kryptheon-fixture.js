@@ -113,12 +113,16 @@ function toStoredErrors(list) {
 }
 
 function normalisedEntry(current) {
-  return {
+  const stored = {
     url: current.url,
     title: current.title,
     consoleErrors: toStoredErrors(current.consoleErrors),
     failedRequests: toStoredRequests(current.failedRequests),
   };
+  // Only when there is one. A run whose capture failed must not write an empty
+  // signature over a good one, or the next run would report everything as gone.
+  if (current.signature) stored.signature = current.signature;
+  return stored;
 }
 
 function writeBaseline(file, key, entry) {
@@ -171,12 +175,17 @@ function normaliseTitle(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
 }
 
-// Only the address and title decide pass or fail. Browser noise changing is
-// not on its own a regression.
+// The address, the title, and what the page ended up showing decide pass or
+// fail. Browser noise changing is not on its own a regression.
 function compareBaselines(previous, current) {
   const urlChanged = normaliseUrl(previous.url) !== normaliseUrl(current.url);
   const titleChanged = normaliseTitle(previous.title) !== normaliseTitle(current.title);
-  if (!urlChanged && !titleChanged) return null;
+  if (!urlChanged && !titleChanged) {
+    // Nothing moved in the address bar. This is the case the address and title
+    // alone cannot see: a single-page app with a catch-all route lands on the
+    // same URL under the same title whether the flow worked or not.
+    return signature.compareSignatures(previous.signature, current.signature);
+  }
 
   const what =
     urlChanged && titleChanged ? 'the page address and title changed'
@@ -214,6 +223,17 @@ function newObservations(current, previous) {
   };
 }
 
+// Adds a signature to an accepted baseline that predates the feature, without
+// touching anything else about it - including when it was recorded, which is
+// what the failure report means by "this last worked at".
+function upgradeBaseline(file, key, sig) {
+  const all = readBaselines(file);
+  const entry = all[key];
+  if (!entry || typeof entry !== 'object' || entry.signature || !sig) return false;
+  entry.signature = sig;
+  return saveBaselines(file, all);
+}
+
 // The whole decision in one call: create on first sight, otherwise compare.
 function applyBaseline(file, key, current) {
   const previous = readBaselines(file)[key];
@@ -222,7 +242,16 @@ function applyBaseline(file, key, current) {
     return { status: 'created', message: null };
   }
   const message = compareBaselines(previous, current);
-  return message ? { status: 'changed', message: message } : { status: 'match', message: null };
+  if (message) return { status: 'changed', message: message };
+
+  // A baseline from before signatures existed passes on address and title, and
+  // learns its signature here. Doing it on a pass rather than up front means an
+  // upgraded project never fails on its first run under the new version.
+  if (!previous.signature && current.signature) {
+    upgradeBaseline(file, key, current.signature);
+    return { status: 'learned', message: null };
+  }
+  return { status: 'match', message: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -274,20 +303,18 @@ const test = base.test.extend({
 
     await use(page);
 
-    // Step one of the DOM signature: read the page, for both passing and
-    // failing tests, and hand it to the CLI to print. Nothing is stored in a
-    // baseline, nothing is compared, and nothing here can change the outcome -
-    // collection does not even run unless the flag is set, so with it off this
-    // is a single string compare.
+    // Read the page before anything else looks at the outcome. A test that
+    // failed is exactly the one where knowing what was on screen matters most,
+    // so this runs whether it passed or not. It is null when the page could
+    // not be read at all, and a null is never treated as a difference - not
+    // knowing what the page showed is not evidence that it changed.
     //
-    // Handed over through a file rather than printed. Playwright pipes this
-    // worker's descriptors and gives whatever comes out to the reporter's stdio
-    // hooks, which kryptheon's reporter does not implement, so anything printed
-    // from here is collected and dropped before it can reach a terminal.
-    if (signature.signatureEnabled()) {
-      const captured = await signature.collectSignature(page, failedRequests);
-      signature.recordSignature(testInfo.title, captured);
-    }
+    // Printed only when asked for, and handed to the CLI through a file:
+    // Playwright pipes this worker's descriptors and gives whatever comes out
+    // to reporter stdio hooks that this reporter does not implement, so
+    // anything printed from here is dropped before it reaches a terminal.
+    const captured = await signature.collectSignature(page, failedRequests);
+    if (signature.signatureEnabled()) signature.recordSignature(testInfo.title, captured);
 
     // The test's own assertions decide first. A test that already failed keeps
     // its own error, and never contributes a baseline.
@@ -296,7 +323,7 @@ const test = base.test.extend({
       return;
     }
 
-    // Passed: capture what the page ended up as, noise included.
+    // Passed: keep what the page ended up as, noise included.
     let current = null;
     try {
       current = {
@@ -304,6 +331,7 @@ const test = base.test.extend({
         title: normaliseTitle(await page.title()),
         consoleErrors: consoleErrors,
         failedRequests: failedRequests,
+        signature: captured,
       };
     } catch (e) {
       current = null; // page closed by the test - leave any baseline untouched
@@ -336,5 +364,6 @@ module.exports = {
   normaliseTitle: normaliseTitle,
   compareBaselines: compareBaselines,
   applyBaseline: applyBaseline,
+  upgradeBaseline: upgradeBaseline,
   BASELINE_FILE: BASELINE_FILE,
 };

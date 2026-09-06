@@ -31,8 +31,10 @@
     "@playwright/test": "^1.62.1"
   },
   "scripts": {
-    "check": "node kryptheon-reporter.check.js && node kryptheon-signature.check.js && node kryptheon-signature.stream.check.js",
-    "check:stream": "node kryptheon-signature.stream.check.js"
+    "check": "node kryptheon-reporter.check.js && node kryptheon-signature.check.js && node kryptheon-signature.stream.check.js && node kryptheon-signature.baseline.check.js && node kryptheon-signature.settle.check.js",
+    "check:stream": "node kryptheon-signature.stream.check.js",
+    "check:baseline": "node kryptheon-signature.baseline.check.js",
+    "check:settle": "node kryptheon-signature.settle.check.js"
   },
   "keywords": [
     "playwright",

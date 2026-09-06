@@ -189,8 +189,11 @@ function translate(message) {
       return l.indexOf('Baseline changed:') !== -1;
     });
     const head = lines[headIndex].replace(/^.*Baseline changed:\s*/, '');
+    // An allowlist, so a stack trace that happens to follow the message can
+    // never leak into the report. Address and title come from the original
+    // baseline; the rest name what the page stopped or started showing.
     const details = lines.slice(headIndex + 1).filter(function (l) {
-      return /^(Address|Title) (was|now):/.test(l);
+      return /^(Address|Title) (was|now):/.test(l) || /^(Headings|Buttons and links|Form fields) that are (gone|new):/.test(l) || /^Requests that failed this time:/.test(l);
     });
     return {
       reason: capitalise(head),

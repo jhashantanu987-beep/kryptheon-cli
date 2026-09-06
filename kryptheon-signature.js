@@ -117,6 +117,79 @@ function buildSignature(raw) {
 }
 
 // ---------------------------------------------------------------------------
+// Comparing two signatures.
+// ---------------------------------------------------------------------------
+
+/**
+ * What left and what arrived, as sets.
+ *
+ * Sets, not sequences: a page that moves its buttons around is the same page.
+ * Only something appearing or disappearing is worth stopping a run over.
+ */
+function setDifference(before, after) {
+  const had = new Set(before || []);
+  const has = new Set(after || []);
+  return {
+    gone: [...had].filter((item) => !has.has(item)),
+    added: [...has].filter((item) => !had.has(item)),
+  };
+}
+
+function requestLabel(req) {
+  return (req.method || 'GET') + ' ' + req.path + ' ' + req.status;
+}
+
+function quoteList(items) {
+  return items.map((item) => '"' + item + '"').join(', ');
+}
+
+/**
+ * Compares a stored signature with what this run saw. Returns a message
+ * describing the change, or null when nothing worth failing over moved.
+ *
+ * Returns null when either side is missing. A baseline recorded before this
+ * feature existed has no signature and must keep working on address and title
+ * alone, and a run whose capture failed knows nothing - neither is evidence of
+ * a regression, and treating them as one would fail every old project on
+ * upgrade.
+ */
+function compareSignatures(previous, current) {
+  if (!previous || typeof previous !== 'object') return null;
+  if (!current || typeof current !== 'object') return null;
+
+  const headings = setDifference(previous.headings, current.headings);
+  const actions = setDifference(previous.actions, current.actions);
+  const fields = setDifference(previous.fields, current.fields);
+
+  // Only new failures matter. A 500 that has been fixed since the baseline was
+  // taken is an improvement, and failing the run for it would be perverse.
+  const knownRequests = new Set((previous.failedRequests || []).map(requestLabel));
+  const newRequests = (current.failedRequests || [])
+    .map(requestLabel)
+    .filter((label) => !knownRequests.has(label));
+
+  const moved =
+    headings.gone.length ||
+    headings.added.length ||
+    actions.gone.length ||
+    actions.added.length ||
+    fields.gone.length ||
+    fields.added.length ||
+    newRequests.length;
+  if (!moved) return null;
+
+  const lines = ['Baseline changed: the page ended up somewhere different than before.'];
+  if (headings.gone.length) lines.push('Headings that are gone: ' + quoteList(headings.gone));
+  if (headings.added.length) lines.push('Headings that are new: ' + quoteList(headings.added));
+  if (actions.gone.length) lines.push('Buttons and links that are gone: ' + quoteList(actions.gone));
+  if (actions.added.length) lines.push('Buttons and links that are new: ' + quoteList(actions.added));
+  if (fields.gone.length) lines.push('Form fields that are gone: ' + quoteList(fields.gone));
+  if (fields.added.length) lines.push('Form fields that are new: ' + quoteList(fields.added));
+  if (newRequests.length) lines.push('Requests that failed this time: ' + newRequests.join(', '));
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // The browser side.
 // ---------------------------------------------------------------------------
 
@@ -187,44 +260,118 @@ function signatureEnabled(env) {
   return String(source.KRYPTHEON_DEBUG_SIGNATURE || '') === '1';
 }
 
-/**
- * Lets the page finish whatever it was doing before it is read.
- *
- * A flow that just submitted a form is often still mid-request when the last
- * assertion returns, and reading then describes the page on its way somewhere
- * rather than where it landed. Network idle is the right signal; the short
- * wait is the fallback for a page that keeps a socket open forever.
- */
-async function settle(page, timeout) {
-  const budget = timeout == null ? 2000 : timeout;
+// How often the page is read while waiting for it to hold still.
+const SETTLE_GAP = 200;
+// How long it has to hold still before the reading is believed. Measured, not
+// guessed: against a page that renders 1.5s after its request answers, 700ms
+// still read the screen from before the click and 1200ms read the right one.
+const SETTLE_QUIET = 1200;
+// Never spend longer than this on one signature, however restless the page.
+const SETTLE_BUDGET = 4000;
+// A pending request is worth waiting out first, but not for the whole budget.
+const NETWORK_BUDGET = 1500;
+
+/** Two readings of the same page, exactly. */
+function sameSignature(a, b) {
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+async function pause(page, ms) {
   try {
-    await page.waitForLoadState('networkidle', { timeout: budget });
-    return;
+    await page.waitForTimeout(ms);
   } catch (e) {
-    /* still busy, or no such state - fall through to the short wait */
-  }
-  try {
-    await page.waitForTimeout(300);
-  } catch (e) {
-    /* page already closed */
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
 
+async function readSignature(page, failedRequests) {
+  const raw = await page.evaluate(readPage);
+  return buildSignature({
+    headings: raw.headings,
+    actions: raw.actions,
+    fields: raw.fields,
+    failedRequests: failedRequests,
+  });
+}
+
 /**
- * Reads the page and returns a signature, or null if it could not be read.
- * Never throws: this is a diagnostic and must not become a second failure.
+ * Reads the page once it has stopped changing, and returns a signature - or
+ * null if it could not be read at all. Never throws: this is a diagnostic and
+ * must not become a second failure.
+ *
+ * Why it is not just networkidle. In a single-page app a click causes no
+ * navigation: the request answers and the framework swaps the DOM a moment
+ * later. Playwright's networkidle means "no requests for 500ms", which is a
+ * fact about the network, not about the page - so a render that lands even
+ * 300ms after the response is missed entirely and the reading describes the
+ * screen the user was on *before* the click. That is exactly how a working
+ * login came back as the login form.
+ *
+ * Why it is not a fixed sleep either: whatever number is picked is too short
+ * for a slow machine and wasted on a fast one.
+ *
+ * So: wait out any pending request, then read the page repeatedly until it has
+ * held still for a while. The quiet window matters more than the gap between
+ * reads - two identical readings 200ms apart prove nothing on a page that is
+ * simply waiting, which is why stability is measured from the last change seen
+ * rather than from the first pair that happened to agree. A page that never
+ * settles is capped, and whatever it looked like at the cap is used; running
+ * out of patience is not a reason to fail somebody's test.
  */
+function positiveNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * The quiet window and the cap, either of which a slow app may need more of.
+ *
+ * No amount of waiting can predict a render that has not happened yet, so
+ * these are a judgement about how long a page is given to prove it has
+ * finished. An app that renders later than the window still reads early, and
+ * raising this is the way out of that.
+ */
+function settleSettings(env) {
+  const source = env || process.env;
+  return {
+    quiet: positiveNumber(source.KRYPTHEON_SIGNATURE_QUIET_MS, SETTLE_QUIET),
+    budget: positiveNumber(source.KRYPTHEON_SIGNATURE_BUDGET_MS, SETTLE_BUDGET),
+  };
+}
+
 async function collectSignature(page, failedRequests, options) {
   const opts = options || {};
+  const fromEnv = settleSettings(opts.env);
+  const gap = opts.settleGap == null ? SETTLE_GAP : opts.settleGap;
+  const quiet = opts.settleQuiet == null ? fromEnv.quiet : opts.settleQuiet;
+  const budget = opts.settleBudget == null ? fromEnv.budget : opts.settleBudget;
+
   try {
-    await settle(page, opts.settleTimeout);
-    const raw = await page.evaluate(readPage);
-    return buildSignature({
-      headings: raw.headings,
-      actions: raw.actions,
-      fields: raw.fields,
-      failedRequests: failedRequests,
-    });
+    const started = Date.now();
+
+    // An answer still in flight will change the page the moment it lands, so
+    // it is worth waiting out before deciding the page has stopped moving.
+    try {
+      await page.waitForLoadState('networkidle', {
+        timeout: Math.min(NETWORK_BUDGET, Math.max(0, budget - (Date.now() - started))),
+      });
+    } catch (e) {
+      /* still talking, or the state is unavailable - the loop below copes */
+    }
+
+    let current = await readSignature(page, failedRequests);
+    let lastChange = Date.now();
+
+    for (;;) {
+      const now = Date.now();
+      if (now - lastChange >= quiet) return current;
+      if (now - started >= budget) return current;
+      await pause(page, gap);
+      const next = await readSignature(page, failedRequests);
+      if (!sameSignature(current, next)) lastChange = Date.now();
+      current = next;
+    }
   } catch (e) {
     return null;
   }
@@ -328,10 +475,17 @@ module.exports = {
   signaturePath: signaturePath,
   toSignatureRequests: toSignatureRequests,
   buildSignature: buildSignature,
+  compareSignatures: compareSignatures,
+  setDifference: setDifference,
   signatureEnabled: signatureEnabled,
   collectSignature: collectSignature,
   printSignature: printSignature,
   readPage: readPage,
+  sameSignature: sameSignature,
+  settleSettings: settleSettings,
   MAX_TEXT: MAX_TEXT,
+  SETTLE_GAP: SETTLE_GAP,
+  SETTLE_QUIET: SETTLE_QUIET,
+  SETTLE_BUDGET: SETTLE_BUDGET,
   MAX_ACTIONS: MAX_ACTIONS,
 };

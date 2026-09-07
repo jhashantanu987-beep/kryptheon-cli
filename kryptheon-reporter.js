@@ -409,6 +409,9 @@ function whereToLookLines(obs) {
   const lines = [];
 
   if (obs.url) lines.push('     - Browser was on: ' + obs.url);
+  // Where the flow actually got to, in words. The whole signature stays behind
+  // KRYPTHEON_DEBUG_SIGNATURE for when that much detail is wanted.
+  if (obs.pageShowed) lines.push('     - Page showed: ' + obs.pageShowed);
 
   for (const req of uniq(obs.failedRequests).slice(0, 5)) {
     const meaning = describeStatus(req.status);
@@ -571,6 +574,8 @@ class KryptheonReporter {
     this.previousRuns = [];
     this.records = [];
     this.startedAt = new Date();
+    // Set by any test whose page never said what encoding it was in.
+    this.sawGuessedEncoding = false;
   }
 
   onBegin() {
@@ -627,6 +632,9 @@ class KryptheonReporter {
   }
 
   onTestEnd(test, result) {
+    if ((result.attachments || []).some(function (a) { return a.name === 'kryptheon-encoding'; })) {
+      this.sawGuessedEncoding = true;
+    }
     const status =
       result.status === 'passed' ? 'passed' : result.status === 'skipped' ? 'skipped' : 'failed';
     const timestamp = (result.startTime instanceof Date ? result.startTime : new Date()).toISOString();
@@ -790,6 +798,15 @@ class KryptheonReporter {
       '\nSummary: ' + passed + ' working, ' + failed + ' broken.\n' +
       'History saved to ' + path.basename(HISTORY_FILE) + '\n\n'
     );
+
+    // Once per run, not once per test: it is one fact about the app, and
+    // repeating it under every recording would bury the reports themselves.
+    if (this.sawGuessedEncoding) {
+      process.stdout.write(
+        'Note: this page does not declare a character encoding, so text may look\n' +
+        'garbled here and in the browser. Add <meta charset="utf-8"> to the page.\n\n'
+      );
+    }
   }
 }
 

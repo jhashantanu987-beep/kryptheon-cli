@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const os = require('os');
+const secrets = require(require('path').join(__dirname, '..', 'kryptheon-secrets.js'));
 const replay = require('../kryptheon-replay.js');
 
 const PACKAGE_DIR = path.join(__dirname, '..');
@@ -607,14 +608,43 @@ function takeOutSecrets(relativeFile) {
   return writeSpec(relativeFile, result.source) ? result.replacements : [];
 }
 
+// kryptheon leaves a password file and three files of machine state in the
+// project. If there is already a .gitignore, they belong in it.
+function keepArtefactsOutOfGit() {
+  const added = secrets.updateGitignore(USER_DIR);
+  if (!added.length) return;
+  console.log('  Added to .gitignore: ' + added.join(', '));
+  console.log('');
+}
+
 function reportSecrets(replacements) {
   if (!replacements || !replacements.length) return;
+  const names = replacements.map((item) => item.envName);
   console.log('  What you typed into the password box was not saved in the test.');
   console.log('');
-  console.log('  Put it in a file called .env next to your tests, like this:');
-  for (const item of replacements) {
-    console.log('    ' + item.envName + '=your ' + String(item.field).toLowerCase() + ' here');
+
+  // Written rather than described. Asked to make the file themselves, most
+  // people on Windows reach for Notepad or Out-File, both of which add a byte
+  // order mark that makes the first line unreadable.
+  const hasEnv = fs.existsSync(path.join(USER_DIR, '.env'));
+  const example = hasEnv ? null : secrets.writeEnvExample(USER_DIR, names);
+  if (example) {
+    console.log('  A file called .env.example has been written here:');
+    for (const name of names) console.log('    ' + name + '=yourpassword');
+    console.log('');
+    console.log('  Put your real password in it and save it as .env, in this folder.');
+  } else {
+    console.log('  Before this can be checked, put it in a file called .env next to');
+    console.log('  your tests, like this:');
+    for (const item of replacements) {
+      console.log('    ' + item.envName + '=your ' + String(item.field).toLowerCase() + ' here');
+    }
   }
+  console.log('');
+  // Said plainly, because the alternative is signing in with a blank password
+  // and spending an afternoon looking at the wrong thing.
+  console.log('  Until that file exists, "kryptheon check" will skip this recording');
+  console.log('  rather than sign in with a blank password.');
   console.log('');
   console.log('  Keep .env out of version control - it holds the real value.');
   console.log('');
@@ -711,6 +741,7 @@ async function finaliseRecording(outFile, context) {
     console.log('');
 
     reportSecrets(secrets);
+    keepArtefactsOutOfGit();
     await offerToDropLogout(named);
     reportReplayRisks(named);
 
@@ -910,6 +941,7 @@ function triageSpecs() {
   const notRecordings = [];
   const runnable = [];
   const withSecrets = [];
+  const missingSecrets = [];
 
   for (const name of listSpecFiles()) {
     const full = path.join(TESTS_DIR, name);
@@ -942,6 +974,18 @@ function triageSpecs() {
     if (replay.scrubSecrets(source).replacements.length) {
       withSecrets.push({ name: name, fields: replay.scrubSecrets(source).replacements });
     }
+
+    // A recording that falls back to an empty password is not run at all. It
+    // would sign in blank, fail, and send the reader looking at their app.
+    const needed = secrets.requiredSecrets(source);
+    const absent = needed.length
+      ? secrets.missingSecrets(needed, { envFile: secrets.envFileFor(USER_DIR) })
+      : [];
+    if (absent.length) {
+      missingSecrets.push({ name: name, names: absent });
+      continue;
+    }
+
     runnable.push(name);
   }
 
@@ -950,6 +994,7 @@ function triageSpecs() {
     notRecordings: notRecordings,
     runnable: runnable,
     withSecrets: withSecrets,
+    missingSecrets: missingSecrets,
   };
 }
 
@@ -986,6 +1031,8 @@ function check(options) {
     console.log('');
     return 1;
   }
+  keepArtefactsOutOfGit();
+
   const triage = triageSpecs();
 
   for (const name of triage.repaired) {
@@ -1001,6 +1048,14 @@ function check(options) {
     console.log('  Re-record it to have the password moved into .env automatically.');
   }
 
+  for (const item of triage.missingSecrets) {
+    console.log('');
+    const example = fs.existsSync(path.join(USER_DIR, '.env.example')) ? '.env.example' : null;
+    for (const line of secrets.missingSecretLines(path.join('tests', item.name), item.names, { examplePath: example })) {
+      console.log(line);
+    }
+  }
+
   for (const name of triage.notRecordings) {
     console.log('');
     console.log('  Skipped ' + path.join('tests', name));
@@ -1013,8 +1068,13 @@ function check(options) {
     console.log('');
     console.log('  Nothing could be checked.');
     console.log('');
-    console.log('  None of the files in tests/ is a usable recording.');
-    console.log('  Record one with:  kryptheon record <url>');
+    if (triage.missingSecrets.length) {
+      console.log('  Every recording here needs a password that is not set yet.');
+      console.log('  Create the .env file above and run this again.');
+    } else {
+      console.log('  None of the files in tests/ is a usable recording.');
+      console.log('  Record one with:  kryptheon record <url>');
+    }
     console.log('');
     return 1;
   }
@@ -1044,6 +1104,15 @@ function check(options) {
 
   // Without this, a green summary could still hide a recording that checked
   // nothing at all.
+  if (triage.missingSecrets.length) {
+    const many = triage.missingSecrets.length > 1;
+    console.log(
+      '  Note: ' + triage.missingSecrets.length + ' recording' + (many ? 's were' : ' was') +
+        ' skipped because a password is not set.'
+    );
+    console.log('');
+  }
+
   if (triage.notRecordings.length) {
     const many = triage.notRecordings.length > 1;
     console.log(
@@ -1052,7 +1121,9 @@ function check(options) {
     );
     console.log('');
   }
-  return status;
+  // Skipped for a missing password is not a pass. The fix is one file away,
+  // and reporting zero would let it be mistaken for a clean run.
+  return status || (triage.missingSecrets.length ? 1 : 0);
 }
 
 // --- setup-ai ---------------------------------------------------------------
@@ -1357,6 +1428,7 @@ module.exports = {
   record: record,
   finaliseRecording: finaliseRecording,
   takeOutSecrets: takeOutSecrets,
+  reportSecrets: reportSecrets,
   reportReplayRisks: reportReplayRisks,
   offerToDropLogout: offerToDropLogout,
   noWindowLines: noWindowLines,

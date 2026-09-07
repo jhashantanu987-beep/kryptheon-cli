@@ -116,6 +116,31 @@ function buildSignature(raw) {
   };
 }
 
+/**
+ * One plain line saying what was on screen, for a failure report.
+ *
+ * Deliberately not the JSON. Somebody reading a failure wants "it was still on
+ * the sign-in page", not a structure to parse; the whole object stays behind
+ * the debug flag for when the detail is actually wanted.
+ */
+function describeSignature(signature) {
+  if (!signature || typeof signature !== 'object') return null;
+  const headings = (signature.headings || []).slice(0, 2);
+  const actions = (signature.actions || []).slice(0, 3);
+  const fields = (signature.fields || []).slice(0, 3);
+
+  let what;
+  if (headings.length) what = quoteList(headings);
+  else if (fields.length) what = 'a form';
+  else if (actions.length) what = 'no headings';
+  else return null; // nothing readable was on the page
+
+  const parts = [];
+  if (actions.length) parts.push(actions.join(', '));
+  if (!headings.length && fields.length) parts.push(fields.join(', '));
+  return parts.length ? what + ' with ' + parts.join('; ') : what;
+}
+
 // ---------------------------------------------------------------------------
 // Comparing two signatures.
 // ---------------------------------------------------------------------------
@@ -251,7 +276,13 @@ function readPage() {
     if (label) fields.push(label);
   }
 
-  return { headings: headings, actions: actions, fields: fields };
+  // A page that never declares its encoding is decoded by guesswork, and the
+  // text really does come out as mojibake - on screen and therefore in here.
+  // That is the app's bug, not this tool's, but it is worth saying once.
+  const declared = !!document.querySelector('meta[charset], meta[http-equiv="Content-Type" i]');
+  const guessedEncoding = !declared && String(document.characterSet || '').toUpperCase() !== 'UTF-8';
+
+  return { headings: headings, actions: actions, fields: fields, guessedEncoding: guessedEncoding };
 }
 
 /** True only for an explicit opt-in. */
@@ -287,12 +318,19 @@ async function pause(page, ms) {
 
 async function readSignature(page, failedRequests) {
   const raw = await page.evaluate(readPage);
-  return buildSignature({
+  const signature = buildSignature({
     headings: raw.headings,
     actions: raw.actions,
     fields: raw.fields,
     failedRequests: failedRequests,
   });
+  // Not part of the signature itself - it describes the page's markup, not
+  // what the page showed, and it must never count as a difference.
+  Object.defineProperty(signature, 'guessedEncoding', {
+    value: !!raw.guessedEncoding,
+    enumerable: false,
+  });
+  return signature;
 }
 
 /**
@@ -476,6 +514,7 @@ module.exports = {
   toSignatureRequests: toSignatureRequests,
   buildSignature: buildSignature,
   compareSignatures: compareSignatures,
+  describeSignature: describeSignature,
   setDifference: setDifference,
   signatureEnabled: signatureEnabled,
   collectSignature: collectSignature,

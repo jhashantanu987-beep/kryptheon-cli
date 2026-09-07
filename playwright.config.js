@@ -12,27 +12,27 @@ const USER_DIR = process.cwd();
 // .env is not fatal: CI can supply the same variables as real env vars.
 // loadEnvFile only exists from Node 20.12, and the package supports 20.6, so
 // fall back to a small parser rather than silently skipping the file.
+// Deliberately not process.loadEnvFile, and this is the whole reason:
+//
+// On Windows, PowerShell's `Out-File -Encoding utf8` and Notepad's "Save as
+// UTF-8" both write a byte order mark. loadEnvFile keeps it, so the first line
+// of the file defines "﻿KRYPTHEON_PASSWORD" rather than
+// "KRYPTHEON_PASSWORD" - measured, not assumed. The variable then reads as
+// undefined, the recording signs in with an empty password, and the login
+// fails for a reason nothing in the report mentions. The file is right there,
+// so nothing warns either.
+//
+// One parser, shared with the CLI, is also what stops the command that decides
+// whether a password is present from disagreeing with the test that uses it.
 function loadEnv(file) {
-  if (typeof process.loadEnvFile === 'function') {
-    try {
-      process.loadEnvFile(file);
-      return;
-    } catch (err) {
-      if (err && err.code !== 'ENOENT') throw err;
-      return;
-    }
-  }
-  let raw;
-  try {
-    raw = require('fs').readFileSync(file, 'utf8');
-  } catch (err) {
-    return; // no .env is fine
-  }
-  for (const line of raw.split('\n')) {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!match) continue;
-    const value = match[2].replace(/^(['"])(.*)\1$/, '$2');
-    if (process.env[match[1]] === undefined) process.env[match[1]] = value;
+  const secrets = require(path.join(PACKAGE_DIR, 'kryptheon-secrets.js'));
+  const values = secrets.readEnvFile(file);
+  for (const name of Object.keys(values)) {
+    // A real environment variable wins over the file - but only a real one.
+    // A variable that exists and is empty is how "unset" arrives from a shell
+    // or a CI job, and letting that beat the file would leave the password
+    // blank with the answer sitting right there on disk.
+    if (!secrets.isSet(process.env[name])) process.env[name] = values[name];
   }
 }
 

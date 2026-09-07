@@ -54,10 +54,14 @@ function baselineKey(specFile, title) {
 function readBaselines(file) {
   let raw;
   try {
-    raw = fs.readFileSync(file, 'utf8');
+    raw = fs.readFileSync(file, { encoding: 'utf8' });
   } catch (e) {
     return {};
   }
+  // An editor that saved the file with a byte order mark would otherwise make
+  // JSON.parse throw, and every baseline would silently vanish - which reads as
+  // "all clear" on the next run rather than as the problem it is.
+  if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -70,7 +74,9 @@ function readBaselines(file) {
 
 function saveBaselines(file, all) {
   try {
-    fs.writeFileSync(file, JSON.stringify(all, null, 2) + '\n', 'utf8');
+    // Explicit, and without a byte order mark: this file is read back by the
+    // same code and by people, and a mismatch would look like the app changed.
+    fs.writeFileSync(file, JSON.stringify(all, null, 2) + '\n', { encoding: 'utf8' });
     return true;
   } catch (e) {
     return false; // diagnostics must never become a second failure
@@ -291,6 +297,9 @@ const test = base.test.extend({
         await testInfo.attach('kryptheon-observations', {
           body: JSON.stringify({
             url: url,
+            // What was actually on screen when it gave up. On a flow that
+            // stopped half way this is the most useful line in the report.
+            pageShowed: signature.describeSignature(captured),
             failedRequests: fresh.failedRequests.slice(0, MAX_ITEMS),
             consoleErrors: fresh.consoleErrors.slice(0, MAX_ITEMS),
           }),
@@ -315,6 +324,16 @@ const test = base.test.extend({
     // anything printed from here is dropped before it reaches a terminal.
     const captured = await signature.collectSignature(page, failedRequests);
     if (signature.signatureEnabled()) signature.recordSignature(testInfo.title, captured);
+
+    // Said once per run by the reporter, not once per test: it is a fact about
+    // the app, and repeating it for every recording would be noise.
+    if (captured && captured.guessedEncoding) {
+      try {
+        await testInfo.attach('kryptheon-encoding', { body: 'guessed', contentType: 'text/plain' });
+      } catch (e) {
+        /* a note, never a second failure */
+      }
+    }
 
     // The test's own assertions decide first. A test that already failed keeps
     // its own error, and never contributes a baseline.

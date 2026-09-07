@@ -13,13 +13,15 @@
     "./kryptheon-reporter": "./kryptheon-reporter.js",
     "./package.json": "./package.json",
     "./kryptheon-replay": "./kryptheon-replay.js",
-    "./kryptheon-signature": "./kryptheon-signature.js"
+    "./kryptheon-signature": "./kryptheon-signature.js",
+    "./kryptheon-secrets": "./kryptheon-secrets.js"
   },
   "files": [
     "bin/",
     "kryptheon-fixture.js",
     "kryptheon-reporter.js",
     "kryptheon-signature.js",
+    "kryptheon-secrets.js",
     "playwright.config.js",
     "README.md",
     "kryptheon-replay.js"
@@ -31,10 +33,11 @@
     "@playwright/test": "^1.62.1"
   },
   "scripts": {
-    "check": "node kryptheon-reporter.check.js && node kryptheon-signature.check.js && node kryptheon-signature.stream.check.js && node kryptheon-signature.baseline.check.js && node kryptheon-signature.settle.check.js",
+    "check": "node kryptheon-reporter.check.js && node kryptheon-signature.check.js && node kryptheon-signature.stream.check.js && node kryptheon-signature.baseline.check.js && node kryptheon-signature.settle.check.js && node kryptheon-step3.check.js",
     "check:stream": "node kryptheon-signature.stream.check.js",
     "check:baseline": "node kryptheon-signature.baseline.check.js",
-    "check:settle": "node kryptheon-signature.settle.check.js"
+    "check:settle": "node kryptheon-signature.settle.check.js",
+    "check:step3": "node kryptheon-step3.check.js"
   },
   "keywords": [
     "playwright",

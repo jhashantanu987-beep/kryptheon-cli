@@ -23,8 +23,22 @@ const TESTS_DIR = path.join(USER_DIR, 'tests');
 const MIN_NODE = [20, 6, 0];
 
 // How long to wait for a browser window to appear before giving up.
-const WINDOW_POLL_MS = 3000;
+//
+// The budget is spent only on time we could actually see. A probe that does
+// not answer tells us nothing about the browser, so it must not count against
+// the person running the command - and the hard limit is there so that a probe
+// which never answers still ends the wait rather than hanging forever.
+//
+// Measured on a warm machine, launch to a detectable window is about 2.5s, so
+// 30s is generous; the number that used to matter more was how the waiting was
+// counted, which was by ticks rather than by the clock.
+const WINDOW_POLL_MS = 5000;
 const WINDOW_TIMEOUT_MS = 30000;
+const WINDOW_HARD_LIMIT_MS = 90000;
+// Lower than the poll interval on purpose: a probe still running when the next
+// one is due is of no use, and every extra second it holds the loop is a second
+// the watchdog is blind.
+const WINDOW_PROBE_TIMEOUT_MS = 4000;
 
 function nodeIsTooOld(version) {
   const parts = String(version || process.versions.node).split('.').map(Number);
@@ -276,6 +290,38 @@ function explainUnreachable(url, kind) {
 
 // Codegen writes Node/Playwright traces to stderr. We never show those; we
 // pick out the part that means something and say it in plain words.
+/**
+ * The lines codegen wrote that look like a real complaint, shown verbatim.
+ *
+ * Playwright's stderr also carries banners and progress noise, so only lines
+ * that read as an error are lifted out - a wall of unrelated output would be
+ * worse than none. Nothing is invented here: if it said nothing, nothing is
+ * printed and the usual explanation follows.
+ */
+function codegenComplaints(stderr, limit) {
+  const seen = Object.create(null);
+  const out = [];
+  for (const raw of String(stderr || '').split('\n')) {
+    const line = raw.replace(/\s+/g, ' ').trim();
+    if (!line) continue;
+    if (!/(^|\b)(Error|error:|ERR_|EACCES|EPERM|ENOENT|Failed|failed to|Timeout|not found)/.test(line)) continue;
+    if (seen[line]) continue;
+    seen[line] = true;
+    out.push(line.length > 160 ? line.slice(0, 157) + '...' : line);
+    if (out.length >= (limit || 3)) break;
+  }
+  return out;
+}
+
+function reportCodegenSaid(stderr) {
+  const said = codegenComplaints(stderr);
+  if (!said.length) return false;
+  console.error('');
+  console.error('  The browser reported:');
+  for (const line of said) console.error('    ' + line);
+  return true;
+}
+
 function explainCodegenFailure(url, stderr) {
   const text = String(stderr || '');
   if (/ERR_CONNECTION_REFUSED/.test(text)) return explainUnreachable(url, 'refused');
@@ -539,8 +585,149 @@ function explainNoWindow() {
   }
 }
 
-// Is a Playwright-controlled browser actually showing a window?
-function browserWindowIsUp() {
+// The browser is there and running; only the window could not be seen. Telling
+// this person their browser never opened would be plainly wrong, so the way
+// past the check comes first rather than buried at the bottom of a list.
+function windowUndetectedLines(seconds) {
+  return [
+    '',
+    '  The browser is running, but no window could be seen.',
+    '',
+    '  A browser process started and was still going after ' + seconds + ' seconds,',
+    '  so this is most likely the check being wrong rather than the browser.',
+    '',
+    '  If the window is open in front of you, run it again with the check off:',
+    '    KRYPTHEON_FORCE_RECORD=1 kryptheon record <url>',
+    '',
+    '  If there is no window on screen, the browser may have opened somewhere',
+    '  with no desktop to draw on - a remote session, a container, or an AI',
+    '  assistant running the command for you.',
+    '',
+    '  Nothing was recorded.',
+    '',
+  ];
+}
+
+// The probe kept failing to answer. Nothing was learned about the browser
+// either way, and saying "no window appeared" would be inventing a fact.
+function probeUnclearLines(answered, unanswered) {
+  return [
+    '',
+    '  Could not tell whether a browser window opened.',
+    '',
+    '  The check that looks for the window did not answer ' + unanswered + ' of its',
+    '  ' + (answered + unanswered) + ' attempts, so there is nothing to go on. This is usually a',
+    '  machine under load, or security software holding up the check itself.',
+    '',
+    '  If the window is open in front of you, run it again with the check off:',
+    '    KRYPTHEON_FORCE_RECORD=1 kryptheon record <url>',
+    '',
+    '  Otherwise just run the same command again.',
+    '',
+    '  Nothing was recorded.',
+    '',
+  ];
+}
+
+/**
+ * Decides, tick by tick, whether to keep waiting for the browser window.
+ *
+ * Kept apart from the timer and the process so it can be driven directly: the
+ * cases worth checking are a probe that answers slowly, one that never answers,
+ * and a browser that runs without a window, none of which are reachable by
+ * launching a real browser and hoping.
+ *
+ * Returns null to keep waiting, or a verdict:
+ *   'window'        - a window is up, stop watching
+ *   'no-window'     - the browser ran for the whole budget without one
+ *   'never-started' - no browser process ever appeared
+ *   'unclear'       - the probe mostly did not answer, so nothing is known
+ */
+function createWindowWatch(options) {
+  const opts = options || {};
+  const probe = opts.probe || inspectBrowserWindows;
+  const clock = opts.now || Date.now;
+  const budgetMs = opts.budgetMs == null ? WINDOW_TIMEOUT_MS : opts.budgetMs;
+  const hardLimitMs = opts.hardLimitMs == null ? WINDOW_HARD_LIMIT_MS : opts.hardLimitMs;
+
+  const started = clock();
+  let lastTick = started;
+  // Time we could actually see, in milliseconds. Counted from the clock rather
+  // than by adding the poll interval per tick: a probe that takes four seconds
+  // used to cost the budget three, so "thirty seconds" was never thirty.
+  let spent = 0;
+  let answered = 0;
+  let unanswered = 0;
+  let sawProcess = false;
+
+  return {
+    tick: function () {
+      const now = clock();
+      const elapsed = now - lastTick;
+      lastTick = now;
+
+      const seen = probe();
+      if (seen && seen.known) {
+        answered++;
+        if (seen.windows > 0) return { verdict: 'window' };
+        if (seen.processes > 0) sawProcess = true;
+        spent += elapsed;
+      } else {
+        // Nothing was learned, so nothing is charged.
+        unanswered++;
+      }
+
+      const outOfBudget = spent >= budgetMs;
+      const outOfPatience = now - started >= hardLimitMs;
+      if (!outOfBudget && !outOfPatience) return null;
+
+      if (unanswered > answered) {
+        return { verdict: 'unclear', answered: answered, unanswered: unanswered };
+      }
+      return {
+        verdict: sawProcess ? 'no-window' : 'never-started',
+        seconds: Math.round((now - started) / 1000),
+      };
+    },
+    stats: function () {
+      return { spent: spent, answered: answered, unanswered: unanswered, sawProcess: sawProcess };
+    },
+  };
+}
+
+// What can be seen of the browser right now.
+//
+//   known     - whether the question could be answered at all
+//   processes - Playwright browser processes running
+//   windows   - how many of those are actually showing a window
+//
+// The three are kept apart on purpose. The old version returned one boolean,
+// so "there is no window" and "the probe did not answer" were the same value,
+// and a slow machine could be told its browser had never opened. They are
+// different facts and they deserve different answers.
+//
+// One command returns both counts: asking twice would double the cost of the
+// most expensive thing in this loop.
+/**
+ * Turns the probe's two numbers into the shape the watchdog reads.
+ *
+ * Anything that is not two numbers means the answer did not arrive intact, and
+ * an answer that did not arrive must never read as "nothing is running" - that
+ * conflation is the whole bug this replaced.
+ */
+function parseWindowProbe(stdout) {
+  const unknown = { known: false, processes: 0, windows: 0 };
+  const parts = String(stdout == null ? '' : stdout).trim().split(/\s+/);
+  if (parts.length < 2) return unknown;
+  const processes = Number(parts[0]);
+  const windows = Number(parts[1]);
+  if (!Number.isFinite(processes) || !Number.isFinite(windows)) return unknown;
+  if (processes < 0 || windows < 0 || windows > processes) return unknown;
+  return { known: true, processes: processes, windows: windows };
+}
+
+function inspectBrowserWindows() {
+  const unknown = { known: false, processes: 0, windows: 0 };
   try {
     if (process.platform === 'win32') {
       const probe = spawnSync(
@@ -548,17 +735,33 @@ function browserWindowIsUp() {
         [
           '-NoProfile',
           '-Command',
-          "@(Get-Process chrome,msedge -ErrorAction SilentlyContinue | " +
-            "Where-Object { $_.Path -like '*ms-playwright*' -and $_.MainWindowHandle -ne 0 }).Count",
+          "$p = @(Get-Process chrome,msedge -ErrorAction SilentlyContinue | " +
+            "Where-Object { $_.Path -like '*ms-playwright*' }); " +
+            "$w = @($p | Where-Object { $_.MainWindowHandle -ne 0 }); " +
+            'Write-Output ("{0} {1}" -f $p.Count, $w.Count)',
         ],
-        { encoding: 'utf8', windowsHide: true, timeout: 8000 }
+        { encoding: 'utf8', windowsHide: true, timeout: WINDOW_PROBE_TIMEOUT_MS }
       );
-      return Number(String(probe.stdout || '').trim()) > 0;
+      // A timeout, a missing shell, or a non-zero exit all mean the same thing:
+      // nothing was learned. Only a well formed answer counts as knowing.
+      if (probe.error || probe.status !== 0) return unknown;
+      return parseWindowProbe(probe.stdout);
     }
-    const probe = spawnSync('ps', ['-A', '-o', 'command'], { encoding: 'utf8', timeout: 8000 });
-    return /ms-playwright/.test(String(probe.stdout || ''));
+
+    const probe = spawnSync('ps', ['-A', '-o', 'command'], {
+      encoding: 'utf8',
+      timeout: WINDOW_PROBE_TIMEOUT_MS,
+    });
+    if (probe.error || probe.status !== 0) return unknown;
+    const running = String(probe.stdout || '')
+      .split('\n')
+      .filter(function (line) {
+        return line.indexOf('ms-playwright') !== -1;
+      }).length;
+    // ps cannot see windows, so a running browser is taken at its word here.
+    return { known: true, processes: running, windows: running };
   } catch (err) {
-    return true; // cannot tell - do not block the user
+    return unknown;
   }
 }
 
@@ -763,8 +966,24 @@ async function finaliseRecording(outFile, context) {
     }
   }
 
-  if (ctx.reason === 'no-window') {
-    explainNoWindow();
+  if (ctx.reason === 'no-window' || ctx.reason === 'never-started' || ctx.reason === 'unclear') {
+    // What the browser itself said comes first. It used to be read only when
+    // codegen exited on its own, so on this path a real error - a bad address,
+    // a refused connection - was captured and then thrown away, and the reader
+    // got a list of guesses instead of the answer.
+    reportCodegenSaid(ctx.stderr);
+    const detail = ctx.detail || {};
+    if (ctx.reason === 'unclear') {
+      for (const line of probeUnclearLines(detail.answered || 0, detail.unanswered || 0)) {
+        console.error(line);
+      }
+    } else if (ctx.reason === 'no-window') {
+      for (const line of windowUndetectedLines(detail.seconds || Math.round(WINDOW_TIMEOUT_MS / 1000))) {
+        console.error(line);
+      }
+    } else {
+      explainNoWindow();
+    }
   } else if (ctx.reason === 'signal') {
     console.log('');
     console.log('  Recording stopped before anything was saved.');
@@ -835,12 +1054,13 @@ async function record(url) {
   // wire it up, name it. Runs once, whether codegen exits on its own or we
   // are interrupted.
   let finished = false;
-  const finalise = async (reason) => {
+  const finalise = async (reason, detail) => {
     if (finished) return 1;
     finished = true;
     const outcome = await finaliseRecording(outFile, {
       hadTestsDir: hadTestsDir,
       target: target,
+      detail: detail || null,
       stderr: stderr,
       reason: reason,
     });
@@ -859,22 +1079,24 @@ async function record(url) {
     // If no window ever appears, stop instead of waiting for someone to kill us.
     // Someone whose window is real but undetectable can turn this off.
     const watchdogOff = !!process.env.KRYPTHEON_FORCE_RECORD;
-    let waited = 0;
+    const watch = createWindowWatch();
     const watchdog = setInterval(() => {
       if (watchdogOff) {
         clearInterval(watchdog);
         return;
       }
-      waited += WINDOW_POLL_MS;
-      if (browserWindowIsUp()) {
+      // A child that has already gone is the close handler's business, not
+      // this one's: it knows the exit code and what was written.
+      if (child.exitCode !== null || child.signalCode !== null) {
         clearInterval(watchdog);
         return;
       }
-      if (waited >= WINDOW_TIMEOUT_MS) {
-        clearInterval(watchdog);
-        stopChild();
-        finalise('no-window').then(resolve);
-      }
+      const outcome = watch.tick();
+      if (!outcome) return;
+      clearInterval(watchdog);
+      if (outcome.verdict === 'window') return;
+      stopChild();
+      finalise(outcome.verdict, outcome).then(resolve);
     }, WINDOW_POLL_MS);
 
     const onSignal = () => {
@@ -1432,6 +1654,15 @@ module.exports = {
   reportReplayRisks: reportReplayRisks,
   offerToDropLogout: offerToDropLogout,
   noWindowLines: noWindowLines,
+  windowUndetectedLines: windowUndetectedLines,
+  probeUnclearLines: probeUnclearLines,
+  createWindowWatch: createWindowWatch,
+  inspectBrowserWindows: inspectBrowserWindows,
+  parseWindowProbe: parseWindowProbe,
+  codegenComplaints: codegenComplaints,
+  WINDOW_TIMEOUT_MS: WINDOW_TIMEOUT_MS,
+  WINDOW_HARD_LIMIT_MS: WINDOW_HARD_LIMIT_MS,
+  WINDOW_POLL_MS: WINDOW_POLL_MS,
   classifyFetchError: classifyFetchError,
   normaliseRecordUrl: normaliseRecordUrl,
   isLocalAddress: isLocalAddress,

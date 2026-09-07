@@ -14,6 +14,7 @@ const { spawn, spawnSync } = require('child_process');
 const os = require('os');
 const secrets = require(require('path').join(__dirname, '..', 'kryptheon-secrets.js'));
 const replay = require('../kryptheon-replay.js');
+const selectors = require('../kryptheon-selectors.js');
 
 const PACKAGE_DIR = path.join(__dirname, '..');
 const USER_DIR = process.cwd();
@@ -897,6 +898,17 @@ async function offerToDropLogout(relativeFile) {
   return true;
 }
 
+// Codegen writes whatever identified the element at the moment it was clicked,
+// which on a page of live figures means the figures end up in the selector. Say
+// so, and say nothing when there is nothing to say.
+function reportFragileSelectors(relativeFile) {
+  const source = readSpec(relativeFile);
+  if (source === null) return [];
+  const findings = selectors.findFragileSelectors(source);
+  for (const line of selectors.describeFragileSelectors(findings)) console.log(line);
+  return findings;
+}
+
 function reportReplayRisks(relativeFile) {
   const source = readSpec(relativeFile);
   if (source === null) return [];
@@ -947,6 +959,7 @@ async function finaliseRecording(outFile, context) {
     keepArtefactsOutOfGit();
     await offerToDropLogout(named);
     reportReplayRisks(named);
+    reportFragileSelectors(named);
 
     return { code: 0, savedAs: named };
   }
@@ -1660,6 +1673,7 @@ module.exports = {
   inspectBrowserWindows: inspectBrowserWindows,
   parseWindowProbe: parseWindowProbe,
   codegenComplaints: codegenComplaints,
+  reportFragileSelectors: reportFragileSelectors,
   WINDOW_TIMEOUT_MS: WINDOW_TIMEOUT_MS,
   WINDOW_HARD_LIMIT_MS: WINDOW_HARD_LIMIT_MS,
   WINDOW_POLL_MS: WINDOW_POLL_MS,

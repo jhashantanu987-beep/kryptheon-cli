@@ -25,17 +25,40 @@ const MAX_ACTIONS = 40;
 // ---------------------------------------------------------------------------
 
 /**
- * One line, no digits, capped.
+ * One whole numeric value, however it happens to be written.
+ *
+ *   0   007   -42   +3.14   100.0   1,234   1,234.56   1 234   1.2.3
+ *
+ * It has to be the whole value, not each run of digits, or two ways of writing
+ * the same quantity stop matching: "0" became "#" while "100.0" became "#.#",
+ * and the signature reported a page as changed because a rate went from 0% to
+ * 100.0%. The parts of a number are therefore all claimed by one match - the
+ * thousands groups, whether separated by a comma or a space, and every decimal
+ * or dotted section after them, which also takes "1.2.3" in one piece rather
+ * than leaving "#.#.#" behind.
+ *
+ * The sign belongs to the number only when nothing word-like precedes it, so
+ * "-42" is a single value while "COVID-19" keeps its hyphen and becomes
+ * "COVID-#".
+ */
+const NUMBER = /(?:(?<![A-Za-z0-9])[-+])?\d+(?: \d{3}|,\d{3})*(?:[.,]\d+)*/g;
+
+/**
+ * One line, every number reduced to the same mark, capped.
  *
  * The digits are the important part. "Savings rate 0%" and "Savings rate 12%"
  * are the same page as far as this is concerned, and a signature that treated
  * them as different would report a regression every time a number moved.
+ *
+ * Only digits are touched. Everything else survives exactly as it was, because
+ * a normaliser aggressive enough to blur the words would hide the changes this
+ * is here to catch.
  */
 function normaliseText(value) {
   const line = String(value == null ? '' : value)
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/\d+/g, '#');
+    .replace(NUMBER, '#');
   return line.length > MAX_TEXT ? line.slice(0, MAX_TEXT) : line;
 }
 

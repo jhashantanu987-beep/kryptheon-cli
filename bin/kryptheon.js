@@ -16,6 +16,7 @@ const secrets = require(require('path').join(__dirname, '..', 'kryptheon-secrets
 const replay = require('../kryptheon-replay.js');
 const selectors = require('../kryptheon-selectors.js');
 const recordings = require('../kryptheon-recordings.js');
+const cleanup = require('../kryptheon-cleanup.js');
 
 const PACKAGE_DIR = path.join(__dirname, '..');
 const USER_DIR = process.cwd();
@@ -1004,6 +1005,26 @@ async function offerToDropLogout(relativeFile) {
 // Codegen writes whatever identified the element at the moment it was clicked,
 // which on a page of live figures means the figures end up in the selector. Say
 // so, and say nothing when there is nothing to say.
+// Codegen records the wrong keystrokes along with the right ones, so a typo
+// corrected on the second attempt becomes a wrong login performed on every
+// run. This takes those out and says what it took, because a tool that edits
+// your recording without telling you is worse than one that leaves the mess.
+function tidyRecording(relativeFile) {
+  const source = readSpec(relativeFile);
+  if (source === null) return [];
+  const result = cleanup.cleanRecording(source);
+  if (!result.removed.length) return [];
+  if (!writeSpec(relativeFile, result.source)) return [];
+  return result.removed;
+}
+
+// Said after the file has its name, with the other closing notes, so the
+// order on screen matches the order things happened in.
+function reportTidying(removed) {
+  for (const line of cleanup.describeCleanup(removed)) console.log(line);
+  return removed || [];
+}
+
 function reportFragileSelectors(relativeFile) {
   const source = readSpec(relativeFile);
   if (source === null) return [];
@@ -1052,12 +1073,18 @@ async function finaliseRecording(outFile, context) {
     // this point. Take it out before doing anything else with the file.
     const secrets = takeOutSecrets(outFile);
 
+    // After the secrets, deliberately. By this point a password is an
+    // environment variable rather than a literal, so nothing that is said
+    // about a field that was typed twice can put the value back on screen.
+    const tidied = tidyRecording(outFile);
+
     const named = await nameRecording(outFile);
     console.log('');
     console.log('  Saved to ' + named);
     console.log('  Run it any time with:  kryptheon check');
     console.log('');
 
+    reportTidying(tidied);
     reportSecrets(secrets);
     keepArtefactsOutOfGit();
     await offerToDropLogout(named);
@@ -1905,6 +1932,8 @@ module.exports = {
   parseWindowProbe: parseWindowProbe,
   codegenComplaints: codegenComplaints,
   reportFragileSelectors: reportFragileSelectors,
+  tidyRecording: tidyRecording,
+  reportTidying: reportTidying,
   remove: remove,
   deleteRecording: deleteRecording,
   dropOldRecordings: dropOldRecordings,

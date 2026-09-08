@@ -15,6 +15,7 @@ const os = require('os');
 const secrets = require(require('path').join(__dirname, '..', 'kryptheon-secrets.js'));
 const replay = require('../kryptheon-replay.js');
 const selectors = require('../kryptheon-selectors.js');
+const recordings = require('../kryptheon-recordings.js');
 
 const PACKAGE_DIR = path.join(__dirname, '..');
 const USER_DIR = process.cwd();
@@ -67,6 +68,7 @@ function usage() {
   console.log('  kryptheon record <url>   open your app and record what you do as a test');
   console.log('  kryptheon check          run every recorded test and report in plain language');
   console.log('  kryptheon accept <name>  agree that one test\'s new result is the correct one');
+  console.log('  kryptheon remove [name]  list the recordings, or remove one you no longer want');
   console.log('  kryptheon setup-ai       tell your AI assistant to check its work');
   console.log('');
   console.log('  add --quiet to check for one line when everything passes');
@@ -854,6 +856,89 @@ function reportSecrets(replacements) {
   console.log('');
 }
 
+// One keypress, no Enter, because the safe answer is the default and getting
+// out of the way should cost nothing.
+//
+// Falls back to the default where there is no terminal to read keys from - a
+// CI job, a pipe, an assistant running the command - rather than waiting for
+// an answer that will never arrive.
+function askKey(question, keys, fallback) {
+  return new Promise((resolve) => {
+    const allowed = keys.map((k) => k.toLowerCase());
+    if (!process.stdin.isTTY || !process.stdin.setRawMode) return resolve(fallback);
+    process.stdout.write(question);
+
+    const finish = (answer) => {
+      process.stdin.removeListener("data", onKey);
+      try {
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+      } catch (err) {
+        /* nothing more to do */
+      }
+      process.stdout.write(answer + String.fromCharCode(10));
+      resolve(answer);
+    };
+
+    const onKey = (chunk) => {
+      const key = String(chunk);
+      // In raw mode Ctrl-C arrives as a keystroke rather than a signal, so it
+      // has to be turned back into one. Sent as a signal rather than exiting
+      // here, because exiting would cut off whatever is still buffered - and
+      // it must not be read as an answer either: stopping is not "keep going".
+      if (key === String.fromCharCode(3)) {
+        process.stdin.removeListener('data', onKey);
+        try {
+          process.stdin.setRawMode(false);
+          process.stdin.pause();
+        } catch (err) {
+          /* nothing more to do */
+        }
+        process.stdout.write(String.fromCharCode(10));
+        process.kill(process.pid, 'SIGINT');
+        return;
+      }
+      if (key === String.fromCharCode(13) || key === String.fromCharCode(10)) return finish(fallback);
+      const pressed = key.toLowerCase();
+      if (allowed.indexOf(pressed) === -1) return; // an unknown key: keep waiting
+      finish(pressed);
+    };
+
+    try {
+      process.stdin.setRawMode(true);
+    } catch (err) {
+      return resolve(fallback);
+    }
+    process.stdin.resume();
+    process.stdin.on("data", onKey);
+  });
+}
+
+// Removing a recording means removing what was remembered about it too, or
+// the saved results of a file that no longer exists stay behind for ever.
+function deleteRecording(name) {
+  const relative = path.join("tests", name).split(path.sep).join("/");
+  try {
+    fs.unlinkSync(path.join(TESTS_DIR, name));
+  } catch (err) {
+    return { ok: false, name: name, why: err.message };
+  }
+
+  try {
+    const api = require(path.join(PACKAGE_DIR, "kryptheon-fixture.js"));
+    const all = api.readBaselines(api.BASELINE_FILE);
+    const keys = recordings.baselineKeysForSpec(all, relative);
+    if (keys.length) {
+      for (const key of keys) delete all[key];
+      fs.writeFileSync(api.BASELINE_FILE, JSON.stringify(all, null, 2) + String.fromCharCode(10), "utf8");
+    }
+  } catch (err) {
+    // The recording is gone either way, and a leftover baseline is not worth
+    // failing the command over.
+  }
+  return { ok: true, name: name, file: relative };
+}
+
 function askYesNo(question) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) return resolve(false);
@@ -868,6 +953,24 @@ function askYesNo(question) {
         /* nothing to do */
       }
       resolve(!/^\s*n/i.test(String(answer)));
+    });
+  });
+}
+
+// A typed answer, for questions whose answers are not single letters.
+function askLine(question) {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) return resolve("");
+    const readline = require("readline");
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (answer) => {
+      rl.close();
+      try {
+        process.stdin.pause();
+      } catch (err) {
+        /* nothing to do */
+      }
+      resolve(String(answer));
     });
   });
 }
@@ -1016,6 +1119,125 @@ async function finaliseRecording(outFile, context) {
   return { code: 1, savedAs: null };
 }
 
+// Every record writes another file and check runs all of them, so a first day
+// spent learning the tool leaves a pile of recordings that never worked and a
+// check that reads like a wall of failures. This is the moment asking costs
+// nothing.
+//
+// Keeping is the default because it is the answer that cannot lose work, and
+// the other one is a single keypress away. Where there is no terminal to
+// answer with - a CI job, an assistant running the command - nothing is asked
+// and nothing is deleted: a question nobody can see is not a question.
+async function askAboutExisting(names) {
+  if (!names.length || !process.stdin.isTTY) return false;
+
+  for (const line of recordings.existingRecordingsQuestion(names.length)) console.log(line);
+  const answer = await askKey("  Keep or replace? [K/r] ", ["k", "r"], "k");
+  if (answer !== "r") return false;
+
+  console.log("");
+  console.log("  They will be deleted once this new recording is saved.");
+  return true;
+}
+
+// The old recordings, once the new one is safely on disk. The new file is
+// never in this list, but it is checked by name anyway - deleting the thing
+// just recorded is the one mistake here that cannot be undone.
+function dropOldRecordings(names, savedAs) {
+  const keep = path.basename(String(savedAs || ""));
+  const gone = [];
+  for (const name of names) {
+    if (path.basename(name) === keep) continue;
+    const result = deleteRecording(name);
+    if (result.ok) gone.push(name);
+  }
+  if (!gone.length) return gone;
+  console.log("  Removed " + recordings.plural(gone.length, "older recording") + ":");
+  for (const name of gone) console.log("    " + path.join("tests", name));
+  console.log("");
+  return gone;
+}
+
+// --- remove -----------------------------------------------------------------
+//
+// Recordings pile up. Without a way to take one out, the only way to stop a
+// half-finished experiment being run for ever is to know where the files live
+// and delete one by hand.
+
+function listRecordings(names) {
+  console.log("");
+  console.log("  " + recordings.plural(names.length, "recording") + " in this project:");
+  console.log("");
+  names.forEach((name, i) => {
+    console.log("    " + String(i + 1).padStart(2) + "  " + path.join("tests", name));
+  });
+  console.log("");
+}
+
+async function remove(name) {
+  const names = listSpecFiles();
+  if (!names.length) {
+    console.log("");
+    console.log("  There are no recordings to remove.");
+    console.log("");
+    return 0;
+  }
+
+  let choice;
+  if (name) {
+    choice = recordings.chooseFromList(names, name);
+  } else {
+    listRecordings(names);
+    if (!process.stdin.isTTY) {
+      console.log("  To remove one, run:  kryptheon remove <name>");
+      console.log("");
+      return 0;
+    }
+    const answer = await askLine("  Which one? [number, a for all, Enter to cancel] ");
+    choice = recordings.chooseFromList(names, answer);
+  }
+
+  if (choice.action === "cancel") {
+    console.log("");
+    console.log("  Nothing was removed.");
+    console.log("");
+    return 0;
+  }
+  if (choice.action === "unclear") {
+    console.error("");
+    console.error("  " + choice.why + ": " + JSON.stringify(choice.said));
+    console.error("  Run \"kryptheon remove\" on its own to see the list.");
+    console.error("");
+    return 1;
+  }
+
+  const gone = [];
+  const failed = [];
+  for (const target of choice.names) {
+    const result = deleteRecording(target);
+    if (result.ok) gone.push(target);
+    else failed.push(result);
+  }
+
+  console.log("");
+  if (gone.length) {
+    console.log("  Removed " + recordings.plural(gone.length, "recording") + ":");
+    for (const g of gone) console.log("    " + path.join("tests", g));
+    console.log("");
+    console.log(
+      gone.length === 1
+        ? "  Its saved result was removed too, so nothing is left behind."
+        : "  Their saved results were removed too, so nothing is left behind.",
+    );
+    console.log("");
+  }
+  for (const f of failed) {
+    console.error("  Could not remove " + path.join("tests", f.name) + ": " + f.why);
+    console.error("");
+  }
+  return failed.length ? 1 : 0;
+}
+
 async function record(url) {
   if (!url) {
     console.error('');
@@ -1037,6 +1259,9 @@ async function record(url) {
   }
 
   if (!ensureBrowser()) return 1;
+
+  const existingBefore = listSpecFiles();
+  const replaceExisting = await askAboutExisting(existingBefore);
 
   const hadTestsDir = fs.existsSync(TESTS_DIR);
   try {
@@ -1077,6 +1302,9 @@ async function record(url) {
       stderr: stderr,
       reason: reason,
     });
+    // Only now, and only if something was actually saved. Deleting first
+    // would mean a recording that went wrong takes the old ones with it.
+    if (replaceExisting && outcome.savedAs) dropOldRecordings(existingBefore, outcome.savedAs);
     return outcome.code;
   };
 
@@ -1619,6 +1847,9 @@ async function main() {
     case 'check':
       return finishWith(check({ quiet: rest.indexOf('--quiet') !== -1 || rest.indexOf('-q') !== -1 }));
       break;
+    case 'remove':
+    case 'rm':
+      return finishWith(await remove(rest.join(" ").trim()));
     case 'setup-ai':
       return finishWith(setupAi());
     case 'accept':
@@ -1674,6 +1905,11 @@ module.exports = {
   parseWindowProbe: parseWindowProbe,
   codegenComplaints: codegenComplaints,
   reportFragileSelectors: reportFragileSelectors,
+  remove: remove,
+  deleteRecording: deleteRecording,
+  dropOldRecordings: dropOldRecordings,
+  askAboutExisting: askAboutExisting,
+  askKey: askKey,
   WINDOW_TIMEOUT_MS: WINDOW_TIMEOUT_MS,
   WINDOW_HARD_LIMIT_MS: WINDOW_HARD_LIMIT_MS,
   WINDOW_POLL_MS: WINDOW_POLL_MS,

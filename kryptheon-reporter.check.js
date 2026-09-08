@@ -1210,9 +1210,17 @@ const baselineCases = [
       }
       if (printed.indexOf('Sign in') !== -1) problems.push('the passing test was still announced');
       // Quiet only replaces the closing line when nothing failed; a failing
-      // run still has to say how many broke.
-      if (printed.indexOf('1 working, 1 broken') === -1) {
+      // run still has to say where it stands.
+      //
+      // "Checkout" has no recorded pass behind it, so it counts as a recording
+      // with no baseline rather than as one that broke. It still fails, it is
+      // still reported in full above, and the run still owes a closing count -
+      // which is what this is here to check.
+      if (printed.indexOf('1 working, 0 broken') === -1) {
         problems.push('the closing count is missing on a failing run');
+      }
+      if (printed.indexOf('1 recording has no baseline yet') === -1) {
+        problems.push('the failing recording is not accounted for anywhere');
       }
       return problems;
     },

@@ -219,8 +219,15 @@ function parseSignatures(stderr) {
         // One test fails on purpose, so the run fails; the passing one must not.
         if (!/^OK\s+Login on the line/m.test(run.stdout)) problems.push('the boundary flow did not pass');
         if (!/^OK\s+Login past the line/m.test(run.stdout)) problems.push('the later flow did not pass');
-        if (!/Summary: 2 working, 1 broken\./.test(run.stdout)) {
+        // The one that fails on purpose has never passed, so it is counted as
+        // a recording with no baseline rather than as one that broke. What
+        // matters here is that the two that waited properly still count as
+        // working, and that the third is accounted for somewhere.
+        if (!/Summary: 2 working, 0 broken\./.test(run.stdout)) {
           problems.push('unexpected summary: ' + (run.stdout.match(/Summary:[^\n]*/) || ['none'])[0]);
+        }
+        if (!/1 recording has no baseline yet/.test(run.stdout)) {
+          problems.push('the flow that failed is not accounted for anywhere');
         }
         return problems;
       },

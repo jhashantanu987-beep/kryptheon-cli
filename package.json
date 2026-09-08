@@ -25,7 +25,8 @@
     "playwright.config.js",
     "README.md",
     "kryptheon-replay.js",
-    "kryptheon-selectors.js"
+    "kryptheon-selectors.js",
+    "kryptheon-recordings.js"
   ],
   "engines": {
     "node": ">=20.6.0"
@@ -34,7 +35,7 @@
     "@playwright/test": "^1.62.1"
   },
   "scripts": {
-    "check": "node kryptheon-reporter.check.js && node kryptheon-signature.check.js && node kryptheon-signature.stream.check.js && node kryptheon-signature.baseline.check.js && node kryptheon-signature.settle.check.js && node kryptheon-signature.number.check.js && node kryptheon-step3.check.js && node kryptheon-watchdog.check.js && node kryptheon-record.check.js && node kryptheon-selectors.check.js && node kryptheon-package.check.js",
+    "check": "node kryptheon-reporter.check.js && node kryptheon-signature.check.js && node kryptheon-signature.stream.check.js && node kryptheon-signature.baseline.check.js && node kryptheon-signature.settle.check.js && node kryptheon-signature.number.check.js && node kryptheon-step3.check.js && node kryptheon-watchdog.check.js && node kryptheon-record.check.js && node kryptheon-selectors.check.js && node kryptheon-recordings.check.js && node kryptheon-package.check.js",
     "check:stream": "node kryptheon-signature.stream.check.js",
     "check:baseline": "node kryptheon-signature.baseline.check.js",
     "check:settle": "node kryptheon-signature.settle.check.js",
@@ -44,7 +45,8 @@
     "check:package": "node kryptheon-package.check.js",
     "prepublishOnly": "node kryptheon-package.check.js",
     "check:selectors": "node kryptheon-selectors.check.js",
-    "check:number": "node kryptheon-signature.number.check.js"
+    "check:number": "node kryptheon-signature.number.check.js",
+    "check:recordings": "node kryptheon-recordings.check.js"
   },
   "keywords": [
     "playwright",

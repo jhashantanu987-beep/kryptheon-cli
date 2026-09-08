@@ -4,6 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const recordings = require('./kryptheon-recordings.js');
 
 // An assistant runs this after every change, so it needs a mode that says
 // nothing at all when the news is good.
@@ -712,6 +713,12 @@ class KryptheonReporter {
       rawMessage: message,
       observations: observations,
     };
+    // Whether this ever worked decides more than one line of the report, so it
+    // is settled before the record is kept. A recording that has never passed
+    // is not a regression - there is nothing for it to have regressed from -
+    // and the summary counts it apart from the ones that broke.
+    const lastPass = this._lastPassed(test.title, recordingId);
+    record.neverPassed = !lastPass;
     this.records.push(record);
 
     const out = [];
@@ -721,7 +728,6 @@ class KryptheonReporter {
 
     for (const detail of translated.details || []) out.push('   ' + detail);
 
-    const lastPass = this._lastPassed(test.title, recordingId);
     out.push(lastPass ? '   This was working on ' + formatWhen(lastPass) + '.' : '   This has not passed before.');
 
     // A first run that fails is a different situation from a regression:
@@ -788,14 +794,24 @@ class KryptheonReporter {
       process.stdout.write('\n(could not write ' + path.basename(HISTORY_FILE) + ': ' + err.message + ')\n');
     }
 
-    if (QUIET && !failed) {
-      const s = passed === 1 ? '' : 's';
-      process.stdout.write('OK  ' + passed + ' recording' + s + ' still working.\n');
+    // "Broken" is kept for recordings that used to work. The ones that never
+    // did are counted and explained separately, because reading "4 broken" on
+    // the first day - when all four were made while learning the tool and none
+    // has ever had a baseline - says the app is at fault when nothing is.
+    const counts = recordings.summarise(this.records);
+
+    // The one line stands in for the whole report only when there is no report
+    // to make. A recording that has never passed is not counted as broken, but
+    // it did fail and its reasons were printed above, so the run still owes the
+    // reader its closing count.
+    if (QUIET && !counts.broken && !counts.unproven) {
+      const s = counts.working === 1 ? '' : 's';
+      process.stdout.write('OK  ' + counts.working + ' recording' + s + ' still working.\n');
       return;
     }
 
     process.stdout.write(
-      '\nSummary: ' + passed + ' working, ' + failed + ' broken.\n' +
+      '\n' + recordings.summaryLines(counts).join('\n') + '\n' +
       'History saved to ' + path.basename(HISTORY_FILE) + '\n\n'
     );
 

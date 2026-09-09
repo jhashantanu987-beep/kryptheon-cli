@@ -726,7 +726,14 @@ class KryptheonReporter {
     out.push('X  ' + test.title);
     out.push('   ' + translated.reason);
 
-    for (const detail of translated.details || []) out.push('   ' + detail);
+    // A difference against a baseline only means something if there is a
+    // baseline of this recording's own to differ from. Saying "this has not
+    // passed before" and then listing headings that are gone says two things
+    // that cannot both be true, and the reader spends their time trying to
+    // reconcile them instead of reading the actual failure.
+    const aboutBaseline = /Baseline changed|ended up somewhere different/.test(translated.reason || '');
+    const details = lastPass || !aboutBaseline ? translated.details || [] : [];
+    for (const detail of details) out.push('   ' + detail);
 
     out.push(lastPass ? '   This was working on ' + formatWhen(lastPass) + '.' : '   This has not passed before.');
 

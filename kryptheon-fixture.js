@@ -21,6 +21,7 @@ const base = require('@playwright/test');
 // the reporter prints.
 const { requestPath } = require('./kryptheon-reporter.js');
 const signature = require('./kryptheon-signature.js');
+const replay = require('./kryptheon-replay.js');
 
 const MAX_ITEMS = 5; // keep the failure block readable
 
@@ -128,6 +129,10 @@ function normalisedEntry(current) {
   // Only when there is one. A run whose capture failed must not write an empty
   // signature over a good one, or the next run would report everything as gone.
   if (current.signature) stored.signature = current.signature;
+  // What recording this was taken from. Without it, a saved result is tied
+  // only to a file name, and a re-recording that lands on the same name
+  // inherits a baseline it never created and can never match.
+  if (current.recordingId) stored.recordingId = current.recordingId;
   return stored;
 }
 
@@ -232,6 +237,17 @@ function newObservations(current, previous) {
 // Adds a signature to an accepted baseline that predates the feature, without
 // touching anything else about it - including when it was recorded, which is
 // what the failure report means by "this last worked at".
+// Ties a saved result written before fingerprints existed to the recording it
+// is now being compared against. Only ever on a pass, so an entry is never
+// bound to a run that did not match it.
+function stampRecording(file, key, recordingId) {
+  const all = readBaselines(file);
+  const entry = all[key];
+  if (!entry || typeof entry !== 'object' || entry.recordingId || !recordingId) return false;
+  entry.recordingId = recordingId;
+  return saveBaselines(file, all);
+}
+
 function upgradeBaseline(file, key, sig) {
   const all = readBaselines(file);
   const entry = all[key];
@@ -247,6 +263,17 @@ function applyBaseline(file, key, current) {
     writeBaseline(file, key, current);
     return { status: 'created', message: null };
   }
+
+  // A saved result taken from a different recording describes a page this
+  // flow never visited. Comparing against it produces a failure on the first
+  // run that no amount of fixing the app can clear, so it is replaced rather
+  // than argued with. Only when both fingerprints are known: an entry from
+  // before they existed is left alone, because "cannot tell" must never
+  // become "accept whatever this run saw".
+  if (previous.recordingId && current.recordingId && previous.recordingId !== current.recordingId) {
+    writeBaseline(file, key, current);
+    return { status: 'created', message: null };
+  }
   const message = compareBaselines(previous, current);
   if (message) return { status: 'changed', message: message };
 
@@ -255,6 +282,10 @@ function applyBaseline(file, key, current) {
   // upgraded project never fails on its first run under the new version.
   if (!previous.signature && current.signature) {
     upgradeBaseline(file, key, current.signature);
+    return { status: 'learned', message: null };
+  }
+  if (!previous.recordingId && current.recordingId) {
+    stampRecording(file, key, current.recordingId);
     return { status: 'learned', message: null };
   }
   return { status: 'match', message: null };
@@ -282,6 +313,17 @@ const test = base.test.extend({
     });
 
     const key = baselineKey(testInfo.file, testInfo.title);
+
+    // The steps this recording actually performs. Comments, blank lines and
+    // the test name are ignored, so tidying a file does not read as a
+    // different recording - only changing what it does.
+    const recordingId = (function () {
+      try {
+        return replay.recordingId(fs.readFileSync(testInfo.file, 'utf8'));
+      } catch (e) {
+        return null;
+      }
+    })();
 
     // Reports only what this run added on top of the last passing run.
     const attachObservations = async () => {
@@ -351,6 +393,7 @@ const test = base.test.extend({
         consoleErrors: consoleErrors,
         failedRequests: failedRequests,
         signature: captured,
+        recordingId: recordingId,
       };
     } catch (e) {
       current = null; // page closed by the test - leave any baseline untouched
@@ -384,5 +427,6 @@ module.exports = {
   compareBaselines: compareBaselines,
   applyBaseline: applyBaseline,
   upgradeBaseline: upgradeBaseline,
+  stampRecording: stampRecording,
   BASELINE_FILE: BASELINE_FILE,
 };

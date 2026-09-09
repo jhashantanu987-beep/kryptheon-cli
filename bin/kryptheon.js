@@ -17,6 +17,8 @@ const replay = require('../kryptheon-replay.js');
 const selectors = require('../kryptheon-selectors.js');
 const recordings = require('../kryptheon-recordings.js');
 const cleanup = require('../kryptheon-cleanup.js');
+const baselines = require('../kryptheon-baselines.js');
+const project = require('../kryptheon-project.js');
 
 const PACKAGE_DIR = path.join(__dirname, '..');
 const USER_DIR = process.cwd();
@@ -1009,6 +1011,39 @@ async function offerToDropLogout(relativeFile) {
 // corrected on the second attempt becomes a wrong login performed on every
 // run. This takes those out and says what it took, because a tool that edits
 // your recording without telling you is worse than one that leaves the mess.
+// A saved result whose recording is gone, or has been recorded again since,
+// describes a page nothing here visits any more. Left in place it is handed
+// to whichever new recording lands on the same name, which then fails on its
+// first run against a baseline it never created.
+function dropDeadBaselines() {
+  const api = (function () {
+    try {
+      return require(path.join(PACKAGE_DIR, 'kryptheon-fixture.js'));
+    } catch (err) {
+      return null;
+    }
+  })();
+  if (!api) return [];
+
+  let all;
+  try {
+    all = api.readBaselines(api.BASELINE_FILE);
+  } catch (err) {
+    return [];
+  }
+  if (!all || !Object.keys(all).length) return [];
+
+  const result = baselines.pruneBaselines(all, USER_DIR);
+  if (!result.changed) return [];
+  try {
+    fs.writeFileSync(api.BASELINE_FILE, JSON.stringify(result.baselines, null, 2) + String.fromCharCode(10), "utf8");
+  } catch (err) {
+    return [];
+  }
+  for (const line of baselines.pruneLines(result.dropped)) console.log(line);
+  return result.dropped;
+}
+
 function tidyRecording(relativeFile) {
   const source = readSpec(relativeFile);
   if (source === null) return [];
@@ -1490,22 +1525,23 @@ function triageSpecs() {
 
 function check(options) {
   const quiet = !!(options && options.quiet);
+
+  // Before anything else. Recordings and results are read out of whatever
+  // folder this was run in, so being in the wrong one does not fail - it
+  // succeeds, about the wrong project. That is the one outcome worth exiting
+  // non-zero over even though nothing was tested.
+  const here = project.inspectProject(USER_DIR);
+  if (!here.ok) {
+    for (const line of project.noProjectLines(here)) console.error(line);
+    return 1;
+  }
+
   // Deliberately not a failure. An assistant told to run this after every
   // change will read a non-zero exit as "something broke" and start fixing
   // code that is perfectly fine. Nothing has been recorded, so there is
   // nothing to verify and nothing to repair.
   if (!listSpecFiles().length) {
-    console.log('');
-    console.log('  Nothing has been recorded yet, so there is nothing to check.');
-    console.log('');
-    console.log('  This is not a failure, and there is nothing in the code to fix.');
-    console.log('');
-    console.log('  To start, record a flow through the app:');
-    console.log('    npx kryptheon record <url>');
-    console.log('');
-    console.log('  That opens a browser window, so it has to be run by a person in');
-    console.log('  a normal terminal - it cannot be done from an AI assistant.');
-    console.log('');
+    for (const line of project.noRecordingsLines()) console.log(line);
     return 0;
   }
   if (!fixtureResolvesForUser() && specsNeedThePackage()) {
@@ -1522,6 +1558,7 @@ function check(options) {
     return 1;
   }
   keepArtefactsOutOfGit();
+  dropDeadBaselines();
 
   const triage = triageSpecs();
 
@@ -1933,6 +1970,7 @@ module.exports = {
   codegenComplaints: codegenComplaints,
   reportFragileSelectors: reportFragileSelectors,
   tidyRecording: tidyRecording,
+  dropDeadBaselines: dropDeadBaselines,
   reportTidying: reportTidying,
   remove: remove,
   deleteRecording: deleteRecording,

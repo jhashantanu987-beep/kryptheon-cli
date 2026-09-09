@@ -148,6 +148,9 @@ function parseSignatures(stderr) {
   const url = 'http://localhost:' + server.address().port + '/';
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kryptheon-settle-'));
+  // check refuses a folder that is not a project, so a throwaway one has to
+  // look like the real thing.
+  fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"demo","version":"1.0.0"}', 'utf8');
   fs.mkdirSync(path.join(dir, 'tests'));
   fs.writeFileSync(path.join(dir, 'tests', 'onthe.spec.js'), flowSpec('Login on the line', SWAP_ON_THE_LINE), 'utf8');
   fs.writeFileSync(path.join(dir, 'tests', 'past.spec.js'), flowSpec('Login past the line', SWAP_PAST_THE_LINE), 'utf8');

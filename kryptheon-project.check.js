@@ -148,8 +148,11 @@ const cases = [
         // against the actual one.
         const forced = Object.assign({}, asHome, { personal: true, ok: false, reason: 'personal' });
         const forcedLines = project.noProjectLines(forced).join('\n');
-        if (!/does not make this a project/.test(forcedLines)) {
+        if (!/not what makes a project/.test(forcedLines)) {
           problems.push('it does not explain the package.json that is sitting there:\n' + forcedLines);
+        }
+        if (!/npm install was run in this folder by mistake/.test(forcedLines)) {
+          problems.push('it does not name how the package.json got there:\n' + forcedLines);
         }
       } finally {
         fs.rmSync(decoy, { recursive: true, force: true });
@@ -215,6 +218,120 @@ const cases = [
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: '6. the home folder WITH a package.json: it stops - the case from the real machine',
+    run: () => {
+      // The one that got past the first version of this guard. An npm install
+      // that ran here by mistake left a package.json, a node_modules and a
+      // tests folder, so every sign said "project"; none of them was true.
+      const problems = [];
+      const home = os.homedir();
+      if (!project.hasPackageJson(home)) {
+        // Not true on every machine, so it is built rather than assumed.
+        problems.push('(note) this machine\'s home folder has no package.json - the built case below still applies');
+      }
+      const inspection = project.inspectProject(home, {});
+      if (inspection.ok) problems.push('the home folder was accepted as a project');
+      if (inspection.reason !== 'personal') {
+        problems.push('it was refused for the wrong reason: ' + inspection.reason);
+      }
+
+      const lines = project.noProjectLines(inspection).join(String.fromCharCode(10));
+      if (!/home or a system folder/.test(lines)) problems.push('no home-folder warning:' + lines);
+      if (inspection.packaged && !/npm install was run in this folder by mistake/.test(lines)) {
+        problems.push('it does not explain the package.json that is sitting there:' + lines);
+      }
+      return problems.filter((x) => x.indexOf('(note)') !== 0);
+    },
+  },
+  {
+    name: '7. the home folder WITHOUT a package.json: it stops too',
+    run: () => {
+      // Built rather than found, so this holds on a machine whose home folder
+      // is still clean - and on one where it is not.
+      const problems = [];
+      const clean = { dir: os.homedir(), packaged: false, personal: true, allowed: false, ok: false, reason: 'personal' };
+      const lines = project.noProjectLines(clean).join(String.fromCharCode(10));
+      if (!/home or a system folder/.test(lines)) problems.push('no home-folder warning:' + lines);
+      if (/npm install was run in this folder/.test(lines)) {
+        problems.push('it blamed an npm install that never happened');
+      }
+      // And the detector itself does not lean on the package.json either way.
+      if (!project.isHomeOrSystem(os.homedir())) problems.push('the home folder is not recognised');
+      return problems;
+    },
+  },
+  {
+    name: '8. the folder every account lives in - C:\\Users, /home - stops as a system folder',
+    run: () => {
+      const problems = [];
+      const accounts = path.dirname(os.homedir());
+      if (!project.isHomeOrSystem(accounts)) {
+        problems.push(accounts + ' is not recognised as a system folder');
+      }
+      // It has no package.json today, so it would be refused anyway. The
+      // point is that one stray npm install there must not turn it into a
+      // project - which is exactly what happened one folder down.
+      const decoy = fs.mkdtempSync(path.join(os.tmpdir(), 'kryptheon-accounts-'));
+      try {
+        fs.writeFileSync(path.join(decoy, 'package.json'), '{"name":"x"}', 'utf8');
+        const asAccounts = Object.assign({}, project.inspectProject(decoy, {}), { personal: true });
+        if (project.inspectProject(accounts, {}).ok) {
+          problems.push(accounts + ' was accepted as a project');
+        }
+        if (!asAccounts.packaged) problems.push('the decoy was built wrong');
+      } finally {
+        fs.rmSync(decoy, { recursive: true, force: true });
+      }
+
+      for (const dir of [path.parse(process.cwd()).root, os.homedir()]) {
+        if (!project.isHomeOrSystem(dir)) problems.push(dir + ' is not recognised');
+      }
+
+      // The list is asked directly as well as through the detector. On Windows
+      // the literal "/Users" resolves to C:\Users and USERPROFILE is the home
+      // folder, so both derived rules are shadowed here and their absence would
+      // not show up in behaviour - on a machine whose home is somewhere
+      // unusual, they are the only things covering it.
+      const folders = project.systemFolders().map((f) => project.tidy(f));
+      if (folders.indexOf(project.tidy(accounts)) === -1) {
+        problems.push('the folder accounts live in is not among the system folders');
+      }
+      // Asked for by position, because by value it is indistinguishable here:
+      // on Windows the literal "/Users" resolves to C:\Users, so dropping the
+      // derived entry changes nothing that can be measured on this machine. It
+      // is the only thing covering a home folder that is not under C:\Users or
+      // /home, so its presence is pinned rather than inferred.
+      if (project.tidy(project.systemFolders()[0]) !== project.tidy(accounts)) {
+        problems.push('the system folders no longer start from where this machine keeps accounts');
+      }
+
+      // And the home folder is recognised on its own account, not because
+      // Windows happens to also name it USERPROFILE.
+      const had = Object.prototype.hasOwnProperty.call(process.env, 'USERPROFILE');
+      const saved = process.env.USERPROFILE;
+      try {
+        delete process.env.USERPROFILE;
+        if (!project.isHomeOrSystem(os.homedir())) {
+          problems.push('the home folder is only recognised through USERPROFILE');
+        }
+      } finally {
+        if (had) process.env.USERPROFILE = saved;
+      }
+      return problems;
+    },
+  },
+  {
+    name: '9. the escape hatch gets past the home folder too, not just a missing package.json',
+    run: () => {
+      const problems = [];
+      const forced = project.inspectProject(os.homedir(), { KRYPTHEON_ALLOW_NO_PACKAGE_JSON: '1' });
+      if (!forced.ok) problems.push('the escape hatch does not cover the home folder');
+      const blocked = project.inspectProject(os.homedir(), {});
+      if (blocked.ok) problems.push('the home folder is open without it');
+      return problems;
     },
   },
 ];

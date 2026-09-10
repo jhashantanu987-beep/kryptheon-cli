@@ -31,33 +31,67 @@ function hasPackageJson(dir) {
   }
 }
 
+/**
+ * One comparable form of a path.
+ *
+ * The trailing separator has to go or C:\Users and C:\Users\ never match, but
+ * it must not be taken off before the root test below. "C:" without a separator
+ * is not the drive - Node resolves it to the current directory - so a root
+ * compared in this form would quietly become "wherever I happen to be".
+ */
+function tidy(dir) {
+  return path.resolve(String(dir || '')).replace(/[\\/]+$/, '').toLowerCase();
+}
+
 /** The folders that are somebody's whole account or the machine itself. */
 function isHomeOrSystem(dir) {
-  const here = path.resolve(String(dir || '')).replace(/[\\/]+$/, '').toLowerCase();
-  const home = path.resolve(os.homedir()).replace(/[\\/]+$/, '').toLowerCase();
-  if (here === home) return true;
-  // A drive or filesystem root: C:\, D:\, /
-  if (here === path.parse(here).root.replace(/[\\/]+$/, '').toLowerCase()) return true;
+  // A drive or filesystem root: C:\, D:\, /. Done on the resolved path, with
+  // its separator still on, for the reason above.
+  const resolved = path.resolve(String(dir || ''));
+  if (resolved === path.parse(resolved).root) return true;
 
-  const system = [
+  const here = tidy(dir);
+  if (here === tidy(os.homedir())) return true;
+
+  for (const candidate of systemFolders()) {
+    if (here === tidy(candidate)) return true;
+  }
+  return false;
+}
+
+/**
+ * Every folder that belongs to the machine or to an account rather than to a
+ * project, resolved.
+ *
+ * The first two entries are derived from the running system; the literals after
+ * them are fallbacks for the usual layouts. They overlap - on Windows
+ * USERPROFILE is the home folder and "/Users" resolves to C:\Users - and the
+ * overlap is deliberate: a machine whose home is somewhere unusual is covered
+ * by the derived pair, and a machine whose environment is missing entries is
+ * covered by the literals.
+ */
+function systemFolders() {
+  return [
+    // The folder every account lives in - C:\Users, /home, /Users. On its own
+    // it has no package.json so it would be refused anyway, but one stray npm
+    // install there and it would look exactly like a project.
+    path.dirname(os.homedir()),
     process.env.SystemRoot,
     process.env.ProgramFiles,
     process.env['ProgramFiles(x86)'],
     process.env.ProgramData,
     process.env.APPDATA,
     process.env.LOCALAPPDATA,
+    process.env.USERPROFILE,
+    '/root',
+    '/home',
+    '/Users',
     '/usr',
     '/etc',
     '/bin',
     '/var',
     '/opt',
   ].filter(Boolean);
-
-  for (const candidate of system) {
-    const root = path.resolve(candidate).replace(/[\\/]+$/, '').toLowerCase();
-    if (here === root) return true;
-  }
-  return false;
 }
 
 /**
@@ -110,8 +144,11 @@ function noProjectLines(inspection) {
     lines.push('  sitting in this one - almost certainly not the one you meant.');
     if (inspection.packaged) {
       lines.push('');
-      lines.push('  There is a package.json here, but installing something into your');
-      lines.push('  home folder leaves one behind. It does not make this a project.');
+      // Said plainly, because otherwise the package.json sitting right there
+      // makes this message look like the bug rather than the diagnosis.
+      lines.push('  There is a package.json here, but that is not what makes a project.');
+      lines.push('  It looks like npm install was run in this folder by mistake, which');
+      lines.push('  leaves a package.json and a node_modules behind.');
     }
     lines.push('');
   } else {
@@ -153,6 +190,8 @@ function noRecordingsLines() {
 module.exports = {
   ESCAPE_HATCH: ESCAPE_HATCH,
   hasPackageJson: hasPackageJson,
+  systemFolders: systemFolders,
+  tidy: tidy,
   isHomeOrSystem: isHomeOrSystem,
   inspectProject: inspectProject,
   noProjectLines: noProjectLines,

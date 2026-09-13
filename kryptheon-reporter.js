@@ -171,6 +171,94 @@ function firstMeaningfulLine(message) {
 }
 
 // ---------------------------------------------------------------------------
+// Errors that belong to no test.
+//
+// A spec file with a syntax error, or one importing something that is not
+// there, never becomes a test at all - so nothing calls onTestEnd and the run
+// ends with no results. Playwright reports it through onError. A reporter that
+// does not implement onError prints a summary of nothing and exits 1, and the
+// person is left with a silent failure and no idea which file is at fault.
+// ---------------------------------------------------------------------------
+
+// Playwright says this once the load errors have already been reported. On its
+// own it means an empty tests folder; after a real error it is a consequence,
+// not a cause, and repeating it just buries the thing that has to be fixed.
+function isNoTestsFound(error) {
+  return /No tests found/i.test(String((error && error.message) || ''));
+}
+
+/**
+ * A load error, reduced to the file, the line and one sentence.
+ *
+ * The message carries a code frame in ANSI colour and repeats the absolute
+ * path inside its own first line. Neither helps here: the path is printed
+ * separately and relative, and the frame belongs in an editor.
+ */
+function readLoadError(error, userDir) {
+  const raw = stripAnsi((error && error.message) || (error && error.value) || String(error || ""));
+  const location = (error && error.location) || {};
+
+  let file = location.file || null;
+  if (file) {
+    try {
+      file = path.relative(userDir || process.cwd(), file);
+    } catch (e) {
+      /* an absolute path is still better than nothing */
+    }
+  }
+
+  // First line only, with the absolute path taken back out of it.
+  let message = raw.split("\n").map(function (l) { return l.trim(); }).filter(Boolean)[0] || "The file could not be read.";
+  if (location.file) message = message.split(location.file + ": ").join("");
+  message = message.replace(/\s*\(\d+:\d+\)\s*$/, "");
+
+  return {
+    file: file,
+    line: typeof location.line === "number" ? location.line : null,
+    message: message,
+  };
+}
+
+/**
+ * What to print when nothing could be loaded.
+ *
+ * Said as "this file", not "the tests failed", because nothing was tested. The
+ * app may be perfectly fine; a file in the tests folder is not.
+ */
+function loadErrorLines(errors, userDir) {
+  const real = (errors || []).filter(function (e) { return !isNoTestsFound(e); });
+  const lines = [];
+
+  if (!real.length) {
+    // Nothing ran and nothing explained why. Saying so is still better than a
+    // summary of zero, which reads as "everything is fine".
+    lines.push("Nothing ran.");
+    lines.push("");
+    lines.push("No recording produced a result, and the test runner gave no reason.");
+    lines.push("Check that the files in tests/ contain a test.");
+    lines.push("");
+    return lines;
+  }
+
+  const many = real.length > 1;
+  lines.push(many ? real.length + " of your recordings could not be read:" : "One of your recordings could not be read:");
+  lines.push("");
+  for (const error of real) {
+    const read = readLoadError(error, userDir);
+    const where = read.file ? read.file + (read.line ? "  line " + read.line : "") : "(the file was not named)";
+    lines.push("  " + where);
+    lines.push("  " + read.message);
+    lines.push("");
+  }
+  lines.push(many
+    ? "Nothing else ran, because those files could not be loaded at all."
+    : "Nothing else ran, because that file could not be loaded at all.");
+  lines.push("Fix it and run this again.");
+  lines.push("");
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
 // Translation: Playwright error -> { reason, advice }
 // ---------------------------------------------------------------------------
 
@@ -575,8 +663,17 @@ class KryptheonReporter {
     this.previousRuns = [];
     this.records = [];
     this.startedAt = new Date();
+    // Errors that belong to no test: a spec file that would not load.
+    this.loadErrors = [];
     // Set by any test whose page never said what encoding it was in.
     this.sawGuessedEncoding = false;
+  }
+
+  // Playwright calls this for anything that happened outside a test: a spec
+  // file that would not load, most often. Kept rather than printed here, so
+  // the reason lands beside the summary instead of ahead of the run.
+  onError(error) {
+    this.loadErrors.push(error);
   }
 
   onBegin() {
@@ -807,10 +904,35 @@ class KryptheonReporter {
     // has ever had a baseline - says the app is at fault when nothing is.
     const counts = recordings.summarise(this.records);
 
-    // The one line stands in for the whole report only when there is no report
-    // to make. A recording that has never passed is not counted as broken, but
-    // it did fail and its reasons were printed above, so the run still owes the
-    // reader its closing count.
+    // A file that would not load is said first, and always - before the quiet
+    // shortcut, and whatever else the run managed to do.
+    //
+    // In practice a file that will not load stops the whole run, so nothing
+    // else has anything to report and the block below returns. This is not
+    // written as though that were guaranteed: onError also carries errors that
+    // arrive outside any test, and one of those turning up after results would
+    // otherwise be dropped in silence - which is the bug this whole thing is
+    // here to fix.
+    const unreadable = this.loadErrors.some(function (e) { return !isNoTestsFound(e); });
+    if (unreadable) {
+      process.stdout.write(
+        String.fromCharCode(10) + loadErrorLines(this.loadErrors, USER_DIR).join(String.fromCharCode(10)),
+      );
+    }
+
+    // Nothing ran at all. A summary of zero reads as good news, and in quiet
+    // mode it would say "0 recordings still working" over the top of a file
+    // that does not compile, so neither is printed. If the reason has not
+    // already been given above, it is given now.
+    if (!this.records.length) {
+      if (!unreadable) {
+        process.stdout.write(
+          String.fromCharCode(10) + loadErrorLines(this.loadErrors, USER_DIR).join(String.fromCharCode(10)),
+        );
+      }
+      return;
+    }
+
     if (QUIET && !counts.broken && !counts.unproven) {
       const s = counts.working === 1 ? '' : 's';
       process.stdout.write('OK  ' + counts.working + ' recording' + s + ' still working.\n');
@@ -838,3 +960,7 @@ module.exports = KryptheonReporter;
 // Shared with the fixture so baselines strip hosts exactly the same way.
 // Attached to the exported class, so `new (require(...))()` keeps working.
 module.exports.requestPath = requestPath;
+
+// Exported for the checks: what a file that would not load turns into.
+module.exports.readLoadError = readLoadError;
+module.exports.loadErrorLines = loadErrorLines;

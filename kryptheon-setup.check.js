@@ -515,6 +515,65 @@ const cases = [
       }
     },
   },
+  {
+    name: '12. nothing tells anybody to type a bare "kryptheon" - after npx that command does not exist',
+    run: async () => {
+      // Measured on a machine without a global install, in a folder record had
+      // just set up: `kryptheon check` -> "The term 'kryptheon' is not
+      // recognized". The machine this is built on has a global link, so the
+      // bare name works here and nowhere else. Twenty messages said it.
+      const problems = [];
+      const bare = /(?<!npx )(?<![\w/.-])kryptheon (record|check|accept|remove|rm|setup-ai)\b/;
+      const shipped = require('./package.json').files;
+      const files = [];
+      for (const entry of shipped) {
+        const full = path.join(__dirname, entry);
+        if (entry.endsWith('/')) {
+          for (const name of fs.readdirSync(full)) if (name.endsWith('.js')) files.push(path.join(entry, name));
+        } else if (entry.endsWith('.js')) {
+          files.push(entry);
+        }
+      }
+      for (const rel of files) {
+        const lines = fs.readFileSync(path.join(__dirname, rel), 'utf8').split(/\r?\n/);
+        lines.forEach((line, i) => {
+          if (/^\s*(\/\/|\*|\/\*)/.test(line)) return; // comments are for us, not for them
+          if (bare.test(line)) problems.push(rel + ':' + (i + 1) + ' says ' + line.trim());
+        });
+      }
+
+      // And through the real command, on the two paths a person meets first.
+      const help = await run([CLI], { timeout: 60000 });
+      // Command lines only - the title line above them names the tool, it is
+      // not something to type.
+      const helpLines = help.out.split(/\r?\n/).filter((l) => /^\s+(npx )?kryptheon (record|check|accept|remove|setup-ai|--version)/.test(l));
+      if (helpLines.length < 5) problems.push('the help did not list the commands:' + NL + help.out);
+      for (const l of helpLines) if (!/^\s+npx kryptheon /.test(l)) problems.push('the help says: ' + l.trim());
+
+      // The one found live: a recording cut off by a closed window is skipped,
+      // and the way out it offers has to be one that works.
+      const dir = tmp('kryptheon-cutoff-');
+      try {
+        write(dir, 'package.json', '{}');
+        write(dir, 'node_modules/kryptheon/kryptheon-fixture.js', '');
+        write(dir, 'tests/recorded-20260924-142532.spec.js', [
+          "import { test, expect } from '@playwright/test';",
+          '',
+          "test('test', async ({ page }) => {",
+          "  await page.goto('http://127.0.0.1:1/');",
+          '});',
+          '',
+        ].join(NL));
+        const r = await run([CLI, 'check'], { cwd: dir, timeout: 60000 });
+        if (!/not a real recording/.test(r.out)) problems.push('the cut-off recording was not reported:' + NL + r.out);
+        if (!/Record it again:\s+npx kryptheon record/.test(r.out)) problems.push('the way out is not npx:' + NL + r.out);
+        for (const l of r.out.split(/\r?\n/)) if (bare.test(l)) problems.push('check says: ' + l.trim());
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return problems;
+    },
+  },
 ];
 
 (async () => {

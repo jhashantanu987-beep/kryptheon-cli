@@ -292,7 +292,7 @@ function translate(message) {
       hideSource: true,
       // %TEST% is filled in with the test's name when the block is printed,
       // so the command resets only this one test.
-      advice: 'if this change is intended, run:  kryptheon accept "%TEST%"',
+      advice: 'if this change is intended, run:  npx kryptheon accept "%TEST%"',
     };
   }
 

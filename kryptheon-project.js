@@ -187,7 +187,7 @@ function noProjectLines(inspection) {
   lines.push('  Change into your project folder and run this again:');
   lines.push('');
   lines.push('    cd path\\to\\your\\project');
-  lines.push('    kryptheon check');
+  lines.push('    npx kryptheon check');
   lines.push('');
   // The person with a web address and no folder at all - an app built in
   // Lovable - has no project to change into, and would be stuck on the line
@@ -215,7 +215,7 @@ function noRecordingsLines() {
     '',
     '  Record a flow through your app first:',
     '',
-    '    kryptheon record http://localhost:3000',
+    '    npx kryptheon record http://localhost:3000',
     '',
     '  That opens a browser window, so it has to be run by a person in a',
     '  normal terminal - it cannot be done from an AI assistant.',

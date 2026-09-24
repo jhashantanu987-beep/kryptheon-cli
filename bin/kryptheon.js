@@ -68,14 +68,14 @@ function usage() {
   console.log('');
   console.log('  kryptheon - record and check your app');
   console.log('');
-  console.log('  kryptheon record <url>   open your app and record what you do as a test');
-  console.log('  kryptheon check          run every recorded test and report in plain language');
-  console.log('  kryptheon accept <name>  agree that one test\'s new result is the correct one');
-  console.log('  kryptheon remove [name]  list the recordings, or remove one you no longer want');
-  console.log('  kryptheon setup-ai       tell your AI assistant to check its work');
+  console.log('  npx kryptheon record <url>   open your app and record what you do as a test');
+  console.log('  npx kryptheon check          run every recorded test and report in plain language');
+  console.log('  npx kryptheon accept <name>  agree that one test\'s new result is the correct one');
+  console.log('  npx kryptheon remove [name]  list the recordings, or remove one you no longer want');
+  console.log('  npx kryptheon setup-ai       tell your AI assistant to check its work');
   console.log('');
   console.log('  add --quiet to check for one line when everything passes');
-  console.log('  kryptheon --version      print the version you have installed');
+  console.log('  npx kryptheon --version      print the version you have installed');
   console.log('');
 }
 
@@ -603,7 +603,7 @@ function windowUndetectedLines(seconds) {
     '  so this is most likely the check being wrong rather than the browser.',
     '',
     '  If the window is open in front of you, run it again with the check off:',
-    '    KRYPTHEON_FORCE_RECORD=1 kryptheon record <url>',
+    '    KRYPTHEON_FORCE_RECORD=1 npx kryptheon record <url>',
     '',
     '  If there is no window on screen, the browser may have opened somewhere',
     '  with no desktop to draw on - a remote session, a container, or an AI',
@@ -626,7 +626,7 @@ function probeUnclearLines(answered, unanswered) {
     '  machine under load, or security software holding up the check itself.',
     '',
     '  If the window is open in front of you, run it again with the check off:',
-    '    KRYPTHEON_FORCE_RECORD=1 kryptheon record <url>',
+    '    KRYPTHEON_FORCE_RECORD=1 npx kryptheon record <url>',
     '',
     '  Otherwise just run the same command again.',
     '',
@@ -852,7 +852,7 @@ function reportSecrets(replacements) {
   console.log('');
   // Said plainly, because the alternative is signing in with a blank password
   // and spending an afternoon looking at the wrong thing.
-  console.log('  Until that file exists, "kryptheon check" will skip this recording');
+  console.log('  Until that file exists, "npx kryptheon check" will skip this recording');
   console.log('  rather than sign in with a blank password.');
   console.log('');
   console.log('  Keep .env out of version control - it holds the real value.');
@@ -1253,7 +1253,7 @@ async function remove(name) {
   } else {
     listRecordings(names);
     if (!process.stdin.isTTY) {
-      console.log("  To remove one, run:  kryptheon remove <name>");
+      console.log("  To remove one, run:  npx kryptheon remove <name>");
       console.log("");
       return 0;
     }
@@ -1270,7 +1270,7 @@ async function remove(name) {
   if (choice.action === "unclear") {
     console.error("");
     console.error("  " + choice.why + ": " + JSON.stringify(choice.said));
-    console.error("  Run \"kryptheon remove\" on its own to see the list.");
+    console.error("  Run \"npx kryptheon remove\" on its own to see the list.");
     console.error("");
     return 1;
   }
@@ -1424,7 +1424,7 @@ async function record(url) {
     console.error('  Which address should I open?');
     console.error('');
     console.error('  Add the web address of your app, for example:');
-    console.error('    kryptheon record https://www.example.com');
+    console.error('    npx kryptheon record https://www.example.com');
     console.error('');
     return 1;
   }
@@ -1666,7 +1666,7 @@ function check(options) {
     console.log('');
     console.log('    npm i -D kryptheon');
     console.log('');
-    console.log('  Then run "kryptheon check" again.');
+    console.log('  Then run "npx kryptheon check" again.');
     console.log('');
     return 1;
   }
@@ -1701,7 +1701,7 @@ function check(options) {
     console.log('  Skipped ' + path.join('tests', name));
     console.log('  This is not a real recording - it only opens a page and stops,');
     console.log('  so it cannot tell you whether anything works.');
-    console.log('  Record it again:  kryptheon record <url>');
+    console.log('  Record it again:  npx kryptheon record <url>');
   }
 
   if (!triage.runnable.length) {
@@ -1713,7 +1713,7 @@ function check(options) {
       console.log('  Create the .env file above and run this again.');
     } else {
       console.log('  None of the files in tests/ is a usable recording.');
-      console.log('  Record one with:  kryptheon record <url>');
+      console.log('  Record one with:  npx kryptheon record <url>');
     }
     console.log('');
     return 1;
@@ -1906,7 +1906,7 @@ function listBaselines(api) {
   console.log('');
   if (!keys.length) {
     console.log('  No tests have a saved result yet.');
-    console.log('  Run "kryptheon check" once and they will be saved automatically.');
+    console.log('  Run "npx kryptheon check" once and they will be saved automatically.');
     console.log('');
     return 0;
   }
@@ -1920,7 +1920,7 @@ function listBaselines(api) {
   }
   console.log('');
   console.log('  To agree that a new result is correct:');
-  console.log('    kryptheon accept "<name>"');
+  console.log('    npx kryptheon accept "<name>"');
   console.log('');
   return 0;
 }
@@ -1939,7 +1939,7 @@ function accept(name) {
   if (!matches.length) {
     console.error('');
     console.error('  No saved result for a test called "' + name + '".');
-    console.error('  Run "kryptheon accept" on its own to see the names.');
+    console.error('  Run "npx kryptheon accept" on its own to see the names.');
     console.error('');
     return 1;
   }

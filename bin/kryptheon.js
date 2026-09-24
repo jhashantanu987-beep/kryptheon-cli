@@ -40,10 +40,14 @@ const MIN_NODE = [20, 6, 0];
 const WINDOW_POLL_MS = 5000;
 const WINDOW_TIMEOUT_MS = 30000;
 const WINDOW_HARD_LIMIT_MS = 90000;
-// Lower than the poll interval on purpose: a probe still running when the next
-// one is due is of no use, and every extra second it holds the loop is a second
-// the watchdog is blind.
-const WINDOW_PROBE_TIMEOUT_MS = 4000;
+// This was 4 seconds, kept under the poll interval so a probe never held the
+// loop past the next one. Measured since, on a Windows 11 machine: the probe
+// takes 2.5-3 seconds with nothing else running, and while the browser was
+// starting it ran past 4 seconds three times in a row. On a slower machine
+// every probe ran out of time and nothing was ever learned. A probe that
+// answers late is worth more than one that never answers; the budget is
+// counted by the clock, so a slow tick costs nothing extra.
+const WINDOW_PROBE_TIMEOUT_MS = 10000;
 
 function nodeIsTooOld(version) {
   const parts = String(version || process.versions.node).split('.').map(Number);
@@ -610,6 +614,49 @@ function windowUndetectedLines(seconds) {
     '  assistant running the command for you.',
     '',
     '  Nothing was recorded.',
+    '',
+  ];
+}
+
+/**
+ * What to do with a browser whose window the watchdog could not confirm:
+ * 'leave' it running, or 'stop' it.
+ *
+ * Found on the first run by somebody new, on Windows 10: the browser opened,
+ * they used their app, and it closed under them - "almost the whole thing" -
+ * with nothing recorded. The probe is a fresh PowerShell each time: measured on
+ * a Windows 11 machine it takes 2.5-3 seconds idle, and ran past its 4 second
+ * limit three times in a row while the browser was starting. On a slower
+ * machine every probe runs out of time, the watchdog learns nothing for 90
+ * seconds, calls that 'unclear' - and the browser somebody was using was
+ * stopped on a guess.
+ *
+ * So the browser is only ever stopped on something known, and never when a
+ * person is at the keyboard to close it themselves:
+ *
+ *   window                       leave - it is up
+ *   unclear                      leave - nothing was learned, so nothing is done
+ *   no-window / never-started    leave with a keyboard, stop without one
+ *
+ * The watchdog exists for the case with no keyboard: an AI assistant, where
+ * there is no desktop and codegen would wait for ever. isTTY can be false in a
+ * perfectly good terminal, so false is not taken as proof of anything - that
+ * case keeps the old behaviour. True is taken as a person being there.
+ */
+function whenWindowUnconfirmed(verdict, atKeyboard) {
+  if (verdict === 'window' || verdict === 'unclear') return 'leave';
+  return atKeyboard ? 'leave' : 'stop';
+}
+
+// Said once, while the person may still be recording, instead of taking the
+// browser away from them.
+function windowUnconfirmedLines() {
+  return [
+    '',
+    '  (I could not confirm the browser window from here - that check is slow',
+    '  on some machines - so I am leaving it alone. If it is on your screen,',
+    '  carry on and close it when you are done. If there is no window',
+    '  anywhere, press Ctrl+C to stop.)',
     '',
   ];
 }
@@ -1520,7 +1567,12 @@ async function record(url) {
       const outcome = watch.tick();
       if (!outcome) return;
       clearInterval(watchdog);
-      if (outcome.verdict === 'window') return;
+      if (whenWindowUnconfirmed(outcome.verdict, !!process.stdin.isTTY) === 'leave') {
+        if (outcome.verdict !== 'window') {
+          for (const line of windowUnconfirmedLines()) console.log(line);
+        }
+        return;
+      }
       stopChild();
       finalise(outcome.verdict, outcome).then(resolve);
     }, WINDOW_POLL_MS);
@@ -2091,9 +2143,12 @@ module.exports = {
   dropOldRecordings: dropOldRecordings,
   askAboutExisting: askAboutExisting,
   askKey: askKey,
+  whenWindowUnconfirmed: whenWindowUnconfirmed,
+  windowUnconfirmedLines: windowUnconfirmedLines,
   WINDOW_TIMEOUT_MS: WINDOW_TIMEOUT_MS,
   WINDOW_HARD_LIMIT_MS: WINDOW_HARD_LIMIT_MS,
   WINDOW_POLL_MS: WINDOW_POLL_MS,
+  WINDOW_PROBE_TIMEOUT_MS: WINDOW_PROBE_TIMEOUT_MS,
   classifyFetchError: classifyFetchError,
   normaliseRecordUrl: normaliseRecordUrl,
   isLocalAddress: isLocalAddress,

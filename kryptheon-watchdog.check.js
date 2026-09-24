@@ -251,6 +251,83 @@ const cases = [
       return problems;
     },
   },
+  {
+    name: 'a browser is never stopped on a guess, nor with a person at the keyboard',
+    run: () => {
+      // The first run by somebody new, Windows 10: the browser closed under
+      // them while they were using it, and nothing was recorded. Every probe
+      // had run out of time, so the watchdog knew nothing - and stopped it.
+      const problems = [];
+      const want = {
+        'window/keyboard': 'leave', 'window/none': 'leave',
+        'unclear/keyboard': 'leave', 'unclear/none': 'leave',
+        'no-window/keyboard': 'leave', 'no-window/none': 'stop',
+        'never-started/keyboard': 'leave', 'never-started/none': 'stop',
+      };
+      for (const key of Object.keys(want)) {
+        const [verdict, who] = key.split('/');
+        const got = cli.whenWindowUnconfirmed(verdict, who === 'keyboard');
+        if (got !== want[key]) problems.push(key + ': expected ' + want[key] + ', got ' + got);
+      }
+      return problems;
+    },
+  },
+  {
+    name: 'record takes that decision - there is no other way for the watchdog to stop the browser',
+    run: () => {
+      // The table above is worth nothing if record stops the browser some other
+      // way. Every place the watchdog's outcome reaches stopChild has to pass
+      // through the decision first.
+      const source = require('fs').readFileSync(require('path').join(__dirname, 'bin', 'kryptheon.js'), 'utf8');
+      const start = source.indexOf('const watchdog = setInterval(');
+      const end = source.indexOf('}, WINDOW_POLL_MS);', start);
+      const problems = [];
+      if (start === -1 || end === -1) return ['could not find the watchdog loop in record'];
+      const loop = source.slice(start, end);
+      const decided = loop.indexOf('whenWindowUnconfirmed(outcome.verdict');
+      const stopped = loop.indexOf('stopChild()');
+      if (decided === -1) problems.push('the watchdog loop does not ask whenWindowUnconfirmed');
+      if (stopped !== -1 && decided !== -1 && stopped < decided) problems.push('the browser can be stopped before the decision is asked');
+      if (loop.split('stopChild()').length - 1 > 1) problems.push('the watchdog loop stops the browser in more than one place');
+      if (!/process\.stdin\.isTTY/.test(loop)) problems.push('the loop does not say whether a person is at the keyboard');
+      return problems;
+    },
+  },
+  {
+    name: 'what is said instead of stopping tells the person what to do either way',
+    run: () => {
+      const text = cli.windowUnconfirmedLines().join(' ');
+      const problems = [];
+      if (!/leaving it alone/.test(text)) problems.push('it does not say the browser is being left alone');
+      if (!/close it when you are done/.test(text)) problems.push('it does not say what to do if the window is there');
+      if (!/Ctrl\+C/.test(text)) problems.push('it does not say what to do if there is no window');
+      if (/Nothing was recorded/.test(text)) problems.push('it says nothing was recorded while the recording carries on');
+      return problems;
+    },
+  },
+  {
+    name: 'the probe has time to answer on this machine, with room for a busy one',
+    run: () => {
+      if (process.platform !== 'win32') return [];
+      // Measured, not assumed. The real probe, three times, on a machine doing
+      // nothing else; the fastest is the steady cost. On the machine this was
+      // written on that was 2.5 seconds - and with a browser starting, the same
+      // probe ran past 4 seconds three times running. So the limit must be well
+      // clear of the idle cost, not just above it.
+      const times = [];
+      for (let i = 0; i < 3; i++) {
+        const t = Date.now();
+        cli.inspectBrowserWindows();
+        times.push(Date.now() - t);
+      }
+      const idle = Math.min.apply(null, times);
+      const limit = cli.WINDOW_PROBE_TIMEOUT_MS;
+      if (limit < idle * 2.5) {
+        return ['the probe gets ' + limit + 'ms; it took ' + idle + 'ms here with nothing else running (' + times.join(', ') + ')'];
+      }
+      return [];
+    },
+  },
 ];
 
 let failures = 0;

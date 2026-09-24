@@ -1116,7 +1116,9 @@ async function finaliseRecording(outFile, context) {
     const named = await nameRecording(outFile);
     console.log('');
     console.log('  Saved to ' + named);
-    console.log('  Run it any time with:  kryptheon check');
+    // npx, not the bare name: somebody who started with `npx kryptheon record`
+    // has no `kryptheon` command, and would be told it does not exist.
+    console.log('  Run it any time with:  npx kryptheon check');
     console.log('');
 
     reportTidying(tidied);
@@ -1300,6 +1302,122 @@ async function remove(name) {
   return failed.length ? 1 : 0;
 }
 
+// --- setting the folder up --------------------------------------------------
+//
+// See the setup section of kryptheon-project.js for why this exists. That file
+// decides; this one asks, writes and installs.
+
+function writeOwnPackageJson(dir) {
+  // 'wx': never over the top of one that appeared since the folder was looked
+  // at. Somebody's package.json is not ours to replace.
+  try {
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ private: true }, null, 2) + '\n', { flag: 'wx' });
+    return true;
+  } catch (err) {
+    return err.code === 'EEXIST';
+  }
+}
+
+function installKryptheonIn(dir) {
+  console.log('  Installing kryptheon here - this usually takes under a minute.');
+  const args = ['install', '--save-dev', 'kryptheon', '--no-audit', '--no-fund', '--loglevel=error'];
+  // npm is npm.cmd on Windows, and Node will not start a .cmd directly
+  // (spawnSync EINVAL), so there it goes through cmd.exe. Every argument is a
+  // fixed string; nothing anybody typed reaches this command line.
+  const result = process.platform === 'win32'
+    ? spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm'].concat(args), { cwd: dir, encoding: 'utf8' })
+    : spawnSync('npm', args, { cwd: dir, encoding: 'utf8' });
+  // Judged by what is on disk afterwards, not by npm's exit code alone.
+  const ok = !result.error && result.status === 0 && project.kryptheonInstalledIn(dir);
+  if (ok) {
+    console.log('  Installed.');
+    console.log('');
+  }
+  return ok;
+}
+
+// A folder `record` is about to use, made ready: its own package.json, its own
+// copy of kryptheon. Returns false, having said why, if either did not happen.
+function makeReady(dir) {
+  if (!project.hasPackageJson(dir) && !writeOwnPackageJson(dir)) {
+    console.error('');
+    console.error('  Could not create package.json in:  ' + dir);
+    console.error('  This folder may be read-only. Make a new folder of your own and');
+    console.error('  run the same command from there.');
+    console.error('');
+    return false;
+  }
+  if (!project.kryptheonInstalledIn(dir) && !installKryptheonIn(dir)) {
+    for (const line of project.installFailedLines()) console.error(line);
+    return false;
+  }
+  return true;
+}
+
+// Run again from inside the new folder rather than moving this process there:
+// every path in this file is worked out once, from the folder the command
+// started in.
+async function recordFromHome(plan, url) {
+  try {
+    fs.mkdirSync(plan.into, { recursive: true });
+  } catch (err) {
+    console.error('');
+    console.error('  Could not make the folder:  ' + plan.into);
+    console.error('  Make a new folder of your own, open a terminal in it, and run the');
+    console.error('  same command again.');
+    console.error('');
+    return 1;
+  }
+  if (!makeReady(plan.into)) return 1;
+
+  const child = spawn(process.execPath, [__filename, 'record', url], { cwd: plan.into, stdio: 'inherit' });
+  // Ctrl-C reaches the child too, and the child is the one that saves what was
+  // recorded. This process waits for it rather than exiting under it.
+  const wait = () => {};
+  process.on('SIGINT', wait);
+  process.on('SIGTERM', wait);
+  const code = await new Promise((resolve) => {
+    child.on('error', () => resolve(1));
+    child.on('close', (status) => resolve(status === null ? 1 : status));
+  });
+  process.removeListener('SIGINT', wait);
+  process.removeListener('SIGTERM', wait);
+
+  if (code === 0) for (const line of project.homeDoneLines(plan.into)) console.log(line);
+  return code;
+}
+
+// Before the browser: it is a 200MB download on a new machine, and a
+// recording that cannot be checked afterwards is somebody's five minutes
+// thrown away. Returns null to carry on recording, or an exit code to stop.
+async function prepareFolder(url) {
+  const plan = project.setupPlan(USER_DIR);
+  if (plan.action === 'ready') return null;
+
+  const refusing = plan.action === 'refuse';
+  for (const line of project.setupLines(plan, url)) (refusing ? console.error : console.log)(line);
+  if (refusing) return 1;
+
+  // Asked where there is a keyboard. Where there is not, the question's own
+  // default is taken rather than refusing: isTTY is false in plenty of
+  // perfectly good terminals (see noWindowLines), and a command that refuses
+  // there can never work for the person who ran it. The one question whose
+  // default is no - a second project inside somebody's first - stays no.
+  const question = project.setupQuestion(plan);
+  const yes = process.stdin.isTTY
+    ? project.answeredYes(await askLine(question.text), question.yesByDefault)
+    : question.yesByDefault;
+  if (!yes) {
+    console.log('');
+    console.log('  Nothing was changed, and nothing was recorded.');
+    console.log('');
+    return 1;
+  }
+
+  if (plan.action === 'home') return await recordFromHome(plan, url);
+  return makeReady(USER_DIR) ? null : 1;
+}
+
 async function record(url) {
   if (!url) {
     console.error('');
@@ -1319,6 +1437,11 @@ async function record(url) {
     explainUnreachable(target, reach.kind);
     return 1;
   }
+
+  // After the address is known to answer, so a typo is not the thing that
+  // gets a folder set up; before the browser, which is the expensive part.
+  const setup = await prepareFolder(url);
+  if (setup !== null) return setup;
 
   if (!ensureBrowser()) return 1;
 
@@ -1429,20 +1552,10 @@ async function record(url) {
 // Recordings import the fixture by package name, which only resolves if
 // kryptheon is in the user's own node_modules. Running through a bare `npx`
 // puts the package somewhere the tests cannot see.
-// Deliberately a filesystem walk, not require.resolve: this file lives inside
-// the kryptheon package, and a package with a name and an "exports" map can
-// always resolve itself by name, so require.resolve would answer "yes" even
-// when the user's tests have no way to find it.
+// One walk, shared with record's setup, so that record and check can never
+// disagree about whether a folder is ready.
 function fixtureResolvesForUser() {
-  let dir = USER_DIR;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, 'node_modules', 'kryptheon', 'kryptheon-fixture.js'))) {
-      return true;
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) return false;
-    dir = parent;
-  }
+  return project.kryptheonReachableFrom(USER_DIR);
 }
 
 // Only a problem if a recording actually asks for it: specs written against a
@@ -1956,6 +2069,7 @@ module.exports = {
   applyRules: applyRules,
   rulesBlock: rulesBlock,
   record: record,
+  prepareFolder: prepareFolder,
   finaliseRecording: finaliseRecording,
   takeOutSecrets: takeOutSecrets,
   reportSecrets: reportSecrets,

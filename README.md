@@ -6,6 +6,27 @@ plain English what broke.
 Runs entirely on your machine. No account, no API key, nothing leaves your
 computer. It is a wrapper around [Playwright](https://playwright.dev).
 
+## Only have a web address?
+
+Built your app in Lovable, Bolt or v0, and there is no project folder on your
+computer? Open a terminal and run:
+
+```
+npx kryptheon record https://your-app.lovable.app
+```
+
+Before it opens anything, it looks at the folder you are in. If that folder is
+not set up for recordings it says so and asks first, then adds a `package.json`
+and kryptheon itself (about 20MB) — nothing else. A new terminal opens in your
+home folder, so from there it keeps your recordings in a `kryptheon-tests`
+folder of their own and tells you where that is.
+
+After every change to your app, from that same folder:
+
+```
+npx kryptheon check
+```
+
 ## Install
 
 ```

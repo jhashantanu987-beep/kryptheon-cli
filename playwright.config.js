@@ -55,6 +55,13 @@ module.exports = defineConfig({
   reporter: [[path.join(PACKAGE_DIR, 'kryptheon-reporter.js')]],
   use: {
     headless: true,
+    // The full Chromium, run headless - not Playwright's separate headless
+    // shell. Measured on a Windows 11 machine: the shell took 23 seconds to
+    // open each new page, every time, and that time counts against the 30
+    // second test timeout. A correct flow longer than about 7 seconds failed,
+    // and the report blamed the app. The full Chromium opened the same page in
+    // 1.5 seconds. It is also the browser `record` checks is installed.
+    channel: 'chromium',
     screenshot: 'only-on-failure',
   },
 });

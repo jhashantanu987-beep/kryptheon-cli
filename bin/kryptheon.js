@@ -2057,6 +2057,57 @@ async function finishWith(code) {
   );
 }
 
+// The copy that must run `check` is the one the recordings load. Measured: in
+// a folder `record` set up, `npx kryptheon@latest check` ran npx's copy, whose
+// Playwright loads the config, while the recordings loaded the folder's copy -
+// two Playwrights, and "Requiring @playwright/test second time" before a single
+// recording ran. `npx kryptheon check` worked in the same folder only because
+// npx happened to pick the local copy.
+//
+// So when this is not the folder's copy, the folder's copy does the work.
+// Returns its exit code, or null to carry on here.
+function handToFolderCopy() {
+  if (process.env.KRYPTHEON_HANDED_OVER) return null; // once, never in a loop
+  const theirs = project.kryptheonCopyFor(USER_DIR);
+  if (!theirs) return null;
+  let same = false;
+  try {
+    same = fs.realpathSync(theirs) === fs.realpathSync(PACKAGE_DIR);
+  } catch (err) {
+    same = path.resolve(theirs) === path.resolve(PACKAGE_DIR);
+  }
+  if (same) return null;
+
+  let theirVersion = 'unknown';
+  try {
+    theirVersion = JSON.parse(fs.readFileSync(path.join(theirs, 'package.json'), 'utf8')).version;
+  } catch (err) {
+    /* said as unknown */
+  }
+  const mine = packageVersion();
+  if (theirVersion !== mine) {
+    // Not an error: the folder's copy is the one its recordings are written
+    // against. Said, so an older one is never mistaken for this one.
+    console.log('');
+    console.log('  Running the kryptheon installed in this folder (' + theirVersion + '), because your');
+    console.log('  recordings load that one. ' + (mine !== 'unknown' ? 'To move this folder to ' + mine + ':' : 'To update it:'));
+    console.log('    npm i -D kryptheon@latest');
+  }
+  const result = spawnSync(process.execPath, [path.join(theirs, 'bin', 'kryptheon.js')].concat(process.argv.slice(2)), {
+    cwd: USER_DIR,
+    stdio: 'inherit',
+    env: Object.assign({}, process.env, { KRYPTHEON_HANDED_OVER: '1' }),
+  });
+  if (result.error) {
+    console.error('');
+    console.error('  Could not run the kryptheon installed in this folder: ' + result.error.message);
+    console.error('  Reinstalling it usually fixes this:  npm i -D kryptheon@latest');
+    console.error('');
+    return 1;
+  }
+  return result.status === null ? 1 : result.status;
+}
+
 async function main() {
   if (nodeIsTooOld()) {
     console.error('');
@@ -2073,9 +2124,11 @@ async function main() {
     case 'record':
       return finishWith(await record(rest[0]));
       break;
-    case 'check':
+    case 'check': {
+      const handedOver = handToFolderCopy();
+      if (handedOver !== null) return finishWith(handedOver);
       return finishWith(check({ quiet: rest.indexOf('--quiet') !== -1 || rest.indexOf('-q') !== -1 }));
-      break;
+    }
     case 'remove':
     case 'rm':
       return finishWith(await remove(rest.join(" ").trim()));
@@ -2122,6 +2175,7 @@ module.exports = {
   rulesBlock: rulesBlock,
   record: record,
   prepareFolder: prepareFolder,
+  handToFolderCopy: handToFolderCopy,
   finaliseRecording: finaliseRecording,
   takeOutSecrets: takeOutSecrets,
   reportSecrets: reportSecrets,

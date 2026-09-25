@@ -239,6 +239,31 @@ function noRecordingsLines() {
 // offers to add it.
 
 /**
+ * The installed kryptheon a recording saved in this folder will load - the
+ * nearest node_modules/kryptheon going up - or null if there is none.
+ *
+ * `check` must be run by this same copy. Found through the MCP server, then
+ * measured by hand in a folder `record` had set up: `npx kryptheon@latest
+ * check` runs npx's own copy, whose Playwright loads the config, while the
+ * recordings load this one's - and Playwright stops with "Requiring
+ * @playwright/test second time" before a single recording runs.
+ */
+function kryptheonCopyFor(dir) {
+  let current = path.resolve(String(dir || ''));
+  for (;;) {
+    const candidate = path.join(current, 'node_modules', 'kryptheon');
+    // Whole copies only. A half-finished install - the fixture there, the rest
+    // not - was handed the run and answered with Node's own stack trace.
+    const whole = ['kryptheon-fixture.js', 'package.json', path.join('bin', 'kryptheon.js')]
+      .every((f) => fs.existsSync(path.join(candidate, f)));
+    if (whole) return candidate;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+/**
  * Whether kryptheon can be loaded by a recording saved in this folder.
  *
  * A filesystem walk, not require.resolve: this file lives inside the kryptheon
@@ -505,6 +530,7 @@ module.exports = {
   ESCAPE_HATCH: ESCAPE_HATCH,
   HOME_RECORDINGS: HOME_RECORDINGS,
   kryptheonReachableFrom: kryptheonReachableFrom,
+  kryptheonCopyFor: kryptheonCopyFor,
   kryptheonInstalledIn: kryptheonInstalledIn,
   projectAbove: projectAbove,
   setupPlan: setupPlan,

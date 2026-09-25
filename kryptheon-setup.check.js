@@ -574,6 +574,43 @@ const cases = [
       return problems;
     },
   },
+  {
+    name: '13. check run by another copy - npx kryptheon@latest - hands over to the folder\'s own, so Playwright loads once',
+    run: async () => {
+      // Found through the MCP server, then measured by hand: in a folder record
+      // had set up, `npx kryptheon@latest check` ran npx's copy while the
+      // recordings loaded the folder's, and Playwright stopped with "Requiring
+      // @playwright/test second time" before anything ran. This repository is
+      // the other copy here; the folder gets its own from the registry, set up
+      // exactly the way record does it.
+      const dir = tmp('kryptheon-twocopies-');
+      try {
+        const setup = await prepareIn(dir, address);
+        if (setup.result !== 'null') return ['could not set the folder up for the check:' + NL + setup.out];
+        write(dir, 'tests/recorded-20260925-120000.spec.js', [
+          "import { test, expect } from '@playwright/test';",
+          '',
+          "test('Press save', async ({ page }) => {",
+          '  await page.goto(' + JSON.stringify(address) + ');',
+          "  await page.getByRole('button', { name: 'Save' }).click();",
+          '});',
+          '',
+        ].join(NL));
+        const r = await run([CLI, 'check'], { cwd: dir, timeout: 180000 });
+        const problems = [];
+        if (/second time/.test(r.out)) problems.push('two Playwrights were loaded:' + NL + r.out.slice(0, 700));
+        if (!/1 working, 0 broken/.test(r.out)) problems.push('the recording did not run and pass:' + NL + r.out.slice(0, 900));
+        const theirs = readJson(path.join(dir, 'node_modules', 'kryptheon', 'package.json')).version;
+        const mine = require('./package.json').version;
+        if (theirs !== mine && r.out.indexOf('installed in this folder (' + theirs + ')') === -1) {
+          problems.push('the folder runs ' + theirs + ' and this is ' + mine + ', and nothing said which one ran:' + NL + r.out.slice(0, 500));
+        }
+        return problems;
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
 ];
 
 (async () => {

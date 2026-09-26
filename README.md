@@ -46,6 +46,22 @@ npx kryptheon record https://your-app.example.com
 A browser opens. Use your app the way a customer would. Close the browser when
 you are done, and the recording is saved as a test.
 
+On its own, a recording knows that every button and field is still there and
+that the last page looks the same. To say what must be true — "Reservation
+received" appears after booking — use the toolbar at the top of the page while
+recording:
+
+| Button | Click it, then click… | Kryptheon then checks |
+| --- | --- | --- |
+| Eye | any element | it is on the page |
+| `ab` | some text | that text is there |
+| Box | a filled-in field | the field still holds that value |
+| `{ }` | a part of the page | that part is laid out the same |
+
+The round red button pauses and resumes recording. The arrow only shows how an
+element would be found; it adds nothing to the test. One check at the end of a
+flow — on the success message — is usually all a recording needs.
+
 ## Check
 
 ```
@@ -126,6 +142,24 @@ npx kryptheon accept "Checkout"
 ```
 
 `npx kryptheon accept` on its own lists what has been saved.
+
+## Renamed buttons
+
+A button that only changed its words has not broken anything. When a step
+cannot find "Reserve a table" and the page shows exactly one new button in its
+place — "Reserve here" — kryptheon clicks that one, carries on through the rest
+of the flow, and says so:
+
+```
+OK  Reserve a table  (16.0s)
+    Renamed: The button "Reserve a table" is now called "Reserve here" - I used "Reserve here" and carried on.
+    Nothing is broken. To stop seeing this, record the flow again.
+```
+
+It only does this when the page proves it: one name gone, the one the step
+wanted, and one new name of the same kind. A button that is gone with nothing
+in its place, or a rename next to other new buttons, fails as it always did.
+Checks you added with the toolbar are never redirected.
 
 ## Files it creates in your folder
 

@@ -183,6 +183,23 @@ function setDifference(before, after) {
   };
 }
 
+// A rename the replay already followed is not also a difference in how the
+// page ended up. Takes the pair out of the lists - both halves, or neither.
+function withoutRenames(diff, renamed) {
+  const norm = (text) => String(text == null ? '' : text).replace(/\s+/g, ' ').trim().toLowerCase();
+  let gone = diff.gone;
+  let added = diff.added;
+  for (const entry of renamed || []) {
+    if (!entry || !entry.was || !entry.now) continue;
+    const was = gone.filter((item) => norm(item).includes(norm(entry.was)));
+    const now = added.filter((item) => norm(item) === norm(entry.now));
+    if (was.length !== 1 || now.length !== 1) continue;
+    gone = gone.filter((item) => item !== was[0]);
+    added = added.filter((item) => item !== now[0]);
+  }
+  return { gone: gone, added: added };
+}
+
 function requestLabel(req) {
   return (req.method || 'GET') + ' ' + req.path + ' ' + req.status;
 }
@@ -200,14 +217,17 @@ function quoteList(items) {
  * alone, and a run whose capture failed knows nothing - neither is evidence of
  * a regression, and treating them as one would fail every old project on
  * upgrade.
+ *
+ * `renamed` is what the replay followed on the way (kryptheon-heal.js): the
+ * same rename showing up again on the last page is not a second problem.
  */
-function compareSignatures(previous, current) {
+function compareSignatures(previous, current, renamed) {
   if (!previous || typeof previous !== 'object') return null;
   if (!current || typeof current !== 'object') return null;
 
   const headings = setDifference(previous.headings, current.headings);
-  const actions = setDifference(previous.actions, current.actions);
-  const fields = setDifference(previous.fields, current.fields);
+  const actions = withoutRenames(setDifference(previous.actions, current.actions), renamed);
+  const fields = withoutRenames(setDifference(previous.fields, current.fields), renamed);
 
   // Only new failures matter. A 500 that has been fixed since the baseline was
   // taken is an improvement, and failing the run for it would be perverse.

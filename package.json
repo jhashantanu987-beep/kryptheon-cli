@@ -1,6 +1,6 @@
 {
   "name": "kryptheon",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Record what you do in your app and get plain-language reports when it breaks.",
   "license": "MIT",
   "type": "commonjs",
@@ -25,6 +25,7 @@
     "playwright.config.js",
     "README.md",
     "kryptheon-replay.js",
+    "kryptheon-heal.js",
     "kryptheon-selectors.js",
     "kryptheon-recordings.js",
     "kryptheon-cleanup.js",
@@ -38,7 +39,7 @@
     "@playwright/test": "^1.62.1"
   },
   "scripts": {
-    "check": "node kryptheon-reporter.check.js && node kryptheon-signature.check.js && node kryptheon-signature.stream.check.js && node kryptheon-signature.baseline.check.js && node kryptheon-signature.settle.check.js && node kryptheon-signature.number.check.js && node kryptheon-env.check.js && node kryptheon-watchdog.check.js && node kryptheon-record.check.js && node kryptheon-selectors.check.js && node kryptheon-recordings.check.js && node kryptheon-cleanup.check.js && node kryptheon-orphan.check.js && node kryptheon-project.check.js && node kryptheon-setup.check.js && node kryptheon-browser.check.js && node kryptheon-load.check.js && node kryptheon-package.check.js",
+    "check": "node kryptheon-reporter.check.js && node kryptheon-signature.check.js && node kryptheon-signature.stream.check.js && node kryptheon-signature.baseline.check.js && node kryptheon-signature.settle.check.js && node kryptheon-signature.number.check.js && node kryptheon-env.check.js && node kryptheon-watchdog.check.js && node kryptheon-record.check.js && node kryptheon-selectors.check.js && node kryptheon-recordings.check.js && node kryptheon-cleanup.check.js && node kryptheon-orphan.check.js && node kryptheon-project.check.js && node kryptheon-setup.check.js && node kryptheon-browser.check.js && node kryptheon-heal.check.js && node kryptheon-load.check.js && node kryptheon-package.check.js",
     "check:reporter": "node kryptheon-reporter.check.js",
     "check:signature": "node kryptheon-signature.check.js",
     "check:stream": "node kryptheon-signature.stream.check.js",
@@ -55,6 +56,7 @@
     "check:project": "node kryptheon-project.check.js",
     "check:setup": "node kryptheon-setup.check.js",
     "check:browser": "node kryptheon-browser.check.js",
+    "check:heal": "node kryptheon-heal.check.js",
     "check:load": "node kryptheon-load.check.js",
     "check:package": "node kryptheon-package.check.js",
     "prepublishOnly": "node kryptheon-package.check.js"

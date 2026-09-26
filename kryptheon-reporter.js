@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const recordings = require('./kryptheon-recordings.js');
+const heal = require('./kryptheon-heal.js');
 
 // An assistant runs this after every change, so it needs a mode that says
 // nothing at all when the news is good.
@@ -57,6 +58,13 @@ const ROLE_NOUNS = {
   option: 'option',
   img: 'image',
   dialog: 'dialog',
+  // What the recorder's "assert text" button picks when the text is in the
+  // body of the page: "a check on the main" meant nothing to anyone.
+  main: 'main part of the page',
+  navigation: 'menu',
+  banner: 'top of the page',
+  contentinfo: 'footer',
+  status: 'status message',
 };
 
 // Returns a lower-case noun phrase such as: the button "Request my demo".
@@ -69,7 +77,9 @@ function describeLocator(locator) {
   m = raw.match(/getByRole\(\s*['"]([^'"]+)['"]\s*,\s*\{[^}]*name:\s*['"]([^'"]*)['"]/);
   if (m) return 'the ' + (ROLE_NOUNS[m[1]] || m[1]) + ' "' + m[2] + '"';
 
-  m = raw.match(/getByRole\(\s*['"]([^'"]+)['"]\s*\)/);
+  // With no name, or with options that are not a name - { level: 1 } is
+  // what a check on a page's main heading gets.
+  m = raw.match(/getByRole\(\s*['"]([^'"]+)['"]\s*(?:,\s*\{[^}]*\}\s*)?\)/);
   if (m) return 'the ' + (ROLE_NOUNS[m[1]] || m[1]);
 
   m = raw.match(/getByText\(\s*['"]([^'"]*)['"]/);
@@ -361,21 +371,50 @@ function translate(message) {
     };
   }
 
+  // What the recorder's snapshot button writes. Its diff is a page of YAML,
+  // which says nothing to someone who has never seen one.
+  if (/expect\([^)]*\)(?:\.not)?\.toMatchAriaSnapshot\(/.test(msg)) {
+    return {
+      reason: capitalise(subject || 'part of the page') + ' is laid out differently than when this check was recorded.',
+      advice: 'something in it was added, removed or renamed - the screenshot shows how it looks now.',
+    };
+  }
+
   // Value comparisons: toHaveTitle / toHaveText / toHaveValue / toHaveCount.
-  m = msg.match(/expect\([^)]*\)(?:\.not)?\.(toHave\w+|toContainText)\([^)]*\)\s*failed/);
+  m = msg.match(/expect\([^)]*\)(\.not)?\.(toHave\w+|toContainText)\([^)]*\)\s*failed/);
   if (m) {
-    const expected = (msg.match(/^\s*Expected:\s*(.+)$/m) || [])[1];
-    const received = (msg.match(/^\s*Received:\s*(.+)$/m) || [])[1];
-    const matcher = m[1];
+    // Playwright names the lines after what it compared: "Expected substring"
+    // for toContainText, "Expected string" for toHaveText and toHaveValue,
+    // "Expected pattern" for a regex. Reading only "Expected:" missed every
+    // check the recorder's own buttons write.
+    const expected = (msg.match(/^\s*Expected(?: substring| string| pattern)?:\s*(.+)$/m) || [])[1];
+    const received = (msg.match(/^\s*Received(?: string)?:\s*(.+)$/m) || [])[1];
+    const negated = Boolean(m[1]);
+    const matcher = m[2];
     const what =
       matcher === 'toHaveTitle' ? 'the page title'
       : matcher === 'toHaveURL' ? 'the page address'
       : matcher === 'toHaveCount' ? 'the number of matching items'
       : subject ? subject.charAt(0).toLowerCase() + subject.slice(1)
       : 'the element';
+    // A whole page of text is not an answer anyone can read. Say what was
+    // looked for, and show what was there only when it is short enough to be
+    // the thing someone meant.
+    const shown = received && received.trim().length <= 82 ? received.trim() : null;
+    if (expected && matcher === 'toContainText') {
+      return {
+        reason: negated
+          ? 'The test expected ' + what + ' not to say ' + expected.trim() + ', but it does.'
+          : 'The test expected ' + what + ' to say ' + expected.trim() + ', but ' +
+            (shown ? 'it says ' + shown + '.' : 'that text is not there.'),
+        advice: 'the wording on the page may have changed, or the step before it did not do what it should.',
+      };
+    }
     if (expected && received) {
       return {
-        reason: 'The test expected ' + what + ' to be ' + expected.trim() + ', but found ' + received.trim() + '.',
+        reason: negated
+          ? 'The test expected ' + what + ' not to be ' + expected.trim() + ', but it is.'
+          : 'The test expected ' + what + ' to be ' + expected.trim() + ', but found ' + (shown || 'something else') + '.',
         advice: 'the wording on the page may have changed, or the page shown was not the one expected.',
       };
     }
@@ -477,6 +516,21 @@ function readObservations(attachments) {
     return JSON.parse(found.body.toString('utf8'));
   } catch (e) {
     return null;
+  }
+}
+
+// Renamed buttons and fields the replay followed (kryptheon-heal.js), each
+// already one sentence. Empty when there were none or the note is unreadable.
+function readRenamed(attachments) {
+  const found = (attachments || []).find(function (a) {
+    return a.name === 'kryptheon-renamed' && a.body;
+  });
+  if (!found) return [];
+  try {
+    const list = JSON.parse(found.body.toString('utf8'));
+    return Array.isArray(list) ? list.filter(function (e) { return e && e.was && e.now; }) : [];
+  } catch (e) {
+    return [];
   }
 }
 
@@ -755,10 +809,23 @@ class KryptheonReporter {
       return;
     }
 
+    const renamed = readRenamed(result.attachments);
+    if (renamed.length) record.renamed = renamed;
+    const renamedLines = renamed.map(function (entry) {
+      return '    Renamed: ' + heal.describeRename(entry);
+    });
+
     if (status === 'passed') {
       this.records.push(record);
       if (!QUIET) {
         process.stdout.write('OK  ' + test.title + '  (' + formatDuration(result.duration) + ')\n');
+      }
+      // Said even when quiet: a pass that followed a rename is still a pass,
+      // but the person should hear that their button has a new name.
+      if (renamedLines.length) {
+        if (QUIET) process.stdout.write('OK  ' + test.title + '\n');
+        process.stdout.write(renamedLines.join('\n') + '\n');
+        process.stdout.write('    Nothing is broken. To stop seeing this, record the flow again.\n');
       }
       return;
     }
@@ -833,6 +900,9 @@ class KryptheonReporter {
     for (const detail of details) out.push('   ' + detail);
 
     out.push(lastPass ? '   This was working on ' + formatWhen(lastPass) + '.' : '   This has not passed before.');
+    // On the way to the failure. It explains why the steps before it worked
+    // even though a name in the recording no longer matches.
+    for (const entry of renamed) out.push('   Renamed on the way: ' + heal.describeRename(entry));
 
     // A first run that fails is a different situation from a regression:
     // nothing has broken, because nothing ever worked. Far more often the

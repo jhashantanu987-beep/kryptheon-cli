@@ -22,6 +22,7 @@ const base = require('@playwright/test');
 const { requestPath } = require('./kryptheon-reporter.js');
 const signature = require('./kryptheon-signature.js');
 const replay = require('./kryptheon-replay.js');
+const heal = require('./kryptheon-heal.js');
 
 const MAX_ITEMS = 5; // keep the failure block readable
 
@@ -133,6 +134,9 @@ function normalisedEntry(current) {
   // only to a file name, and a re-recording that lands on the same name
   // inherits a baseline it never created and can never match.
   if (current.recordingId) stored.recordingId = current.recordingId;
+  // The names each step saw, which is what lets a later run tell a renamed
+  // button from a missing one. See kryptheon-heal.js.
+  if (current.steps && Object.keys(current.steps).length) stored.steps = current.steps;
   return stored;
 }
 
@@ -188,14 +192,14 @@ function normaliseTitle(value) {
 
 // The address, the title, and what the page ended up showing decide pass or
 // fail. Browser noise changing is not on its own a regression.
-function compareBaselines(previous, current) {
+function compareBaselines(previous, current, renamed) {
   const urlChanged = normaliseUrl(previous.url) !== normaliseUrl(current.url);
   const titleChanged = normaliseTitle(previous.title) !== normaliseTitle(current.title);
   if (!urlChanged && !titleChanged) {
     // Nothing moved in the address bar. This is the case the address and title
     // alone cannot see: a single-page app with a catch-all route lands on the
     // same URL under the same title whether the flow worked or not.
-    return signature.compareSignatures(previous.signature, current.signature);
+    return signature.compareSignatures(previous.signature, current.signature, renamed);
   }
 
   const what =
@@ -248,6 +252,18 @@ function stampRecording(file, key, recordingId) {
   return saveBaselines(file, all);
 }
 
+// Keeps the names each step saw on this passing run, and nothing else about
+// the entry - its recorded time is what "this was working on" means.
+function rememberSteps(file, key, steps) {
+  if (!steps || !Object.keys(steps).length) return false;
+  const all = readBaselines(file);
+  const entry = all[key];
+  if (!entry || typeof entry !== 'object') return false;
+  if (JSON.stringify(entry.steps || null) === JSON.stringify(steps)) return false;
+  entry.steps = steps;
+  return saveBaselines(file, all);
+}
+
 function upgradeBaseline(file, key, sig) {
   const all = readBaselines(file);
   const entry = all[key];
@@ -257,7 +273,7 @@ function upgradeBaseline(file, key, sig) {
 }
 
 // The whole decision in one call: create on first sight, otherwise compare.
-function applyBaseline(file, key, current) {
+function applyBaseline(file, key, current, renamed) {
   const previous = readBaselines(file)[key];
   if (!previous || typeof previous !== 'object') {
     writeBaseline(file, key, current);
@@ -274,7 +290,7 @@ function applyBaseline(file, key, current) {
     writeBaseline(file, key, current);
     return { status: 'created', message: null };
   }
-  const message = compareBaselines(previous, current);
+  const message = compareBaselines(previous, current, renamed);
   if (message) return { status: 'changed', message: message };
 
   // A baseline from before signatures existed passes on address and title, and
@@ -325,6 +341,17 @@ const test = base.test.extend({
       }
     })();
 
+    // What the last passing run of this same recording saw. A saved result
+    // from a different recording describes steps this one does not have.
+    const previousEntry = readBaselines(BASELINE_FILE)[key];
+    const sameRecording =
+      Boolean(previousEntry) && typeof previousEntry === 'object' &&
+      !(previousEntry.recordingId && recordingId && previousEntry.recordingId !== recordingId);
+    const healer = heal.watch(page, {
+      memory: sameRecording ? previousEntry.steps : null,
+      fallback: sameRecording ? previousEntry.signature : null,
+    });
+
     // Reports only what this run added on top of the last passing run.
     const attachObservations = async () => {
       let url = null;
@@ -353,6 +380,19 @@ const test = base.test.extend({
     };
 
     await use(page);
+
+    // Said whether the test passed or not: on a pass it is the only thing the
+    // person needs to know, and on a failure it explains the steps before it.
+    if (healer.renamed.length) {
+      try {
+        await testInfo.attach('kryptheon-renamed', {
+          body: JSON.stringify(healer.renamed),
+          contentType: 'application/json',
+        });
+      } catch (e) {
+        /* a note, never a second failure */
+      }
+    }
 
     // Read the page before anything else looks at the outcome. A test that
     // failed is exactly the one where knowing what was on screen matters most,
@@ -394,13 +434,17 @@ const test = base.test.extend({
         failedRequests: failedRequests,
         signature: captured,
         recordingId: recordingId,
+        steps: heal.mergeMemory(sameRecording ? previousEntry.steps : null, healer.learned),
       };
     } catch (e) {
       current = null; // page closed by the test - leave any baseline untouched
     }
     if (!current) return;
 
-    const outcome = applyBaseline(BASELINE_FILE, key, current);
+    const outcome = applyBaseline(BASELINE_FILE, key, current, healer.renamed);
+    if (outcome.status === 'match' || outcome.status === 'learned') {
+      rememberSteps(BASELINE_FILE, key, current.steps);
+    }
     if (outcome.status === 'changed') {
       // Remember what this run saw so `kryptheon accept` can promote it, but
       // leave the accepted baseline exactly as it was.
@@ -428,5 +472,6 @@ module.exports = {
   applyBaseline: applyBaseline,
   upgradeBaseline: upgradeBaseline,
   stampRecording: stampRecording,
+  rememberSteps: rememberSteps,
   BASELINE_FILE: BASELINE_FILE,
 };

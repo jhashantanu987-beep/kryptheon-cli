@@ -526,8 +526,29 @@ function installFailedLines() {
   ];
 }
 
+/**
+ * Whether version `a` is older than `b`, by their numbers. Anything that is
+ * not plain x.y.z is never called older: updating on a guess would change
+ * somebody's package.json for nothing, and only digits and dots ever reach
+ * the npm command line built from the answer.
+ */
+function olderVersion(a, b) {
+  const parse = (v) => {
+    const m = String(v == null ? '' : v).match(/^(\d+)\.(\d+)\.(\d+)$/);
+    return m ? m.slice(1).map(Number) : null;
+  };
+  const x = parse(a);
+  const y = parse(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 3; i++) {
+    if (x[i] !== y[i]) return x[i] < y[i];
+  }
+  return false;
+}
+
 module.exports = {
   ESCAPE_HATCH: ESCAPE_HATCH,
+  olderVersion: olderVersion,
   HOME_RECORDINGS: HOME_RECORDINGS,
   kryptheonReachableFrom: kryptheonReachableFrom,
   kryptheonCopyFor: kryptheonCopyFor,

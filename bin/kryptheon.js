@@ -1365,15 +1365,20 @@ function writeOwnPackageJson(dir) {
   }
 }
 
-function installKryptheonIn(dir) {
-  console.log('  Installing kryptheon here - this usually takes under a minute.');
-  const args = ['install', '--save-dev', 'kryptheon', '--no-audit', '--no-fund', '--loglevel=error'];
-  // npm is npm.cmd on Windows, and Node will not start a .cmd directly
-  // (spawnSync EINVAL), so there it goes through cmd.exe. Every argument is a
-  // fixed string; nothing anybody typed reaches this command line.
-  const result = process.platform === 'win32'
+// `npm install --save-dev <spec>` in a folder. npm is npm.cmd on Windows, and
+// Node will not start a .cmd directly (spawnSync EINVAL), so there it goes
+// through cmd.exe. The spec is always "kryptheon" or "kryptheon@" and a
+// version made of digits and dots; nothing anybody typed reaches this line.
+function npmInstallDev(dir, spec) {
+  const args = ['install', '--save-dev', spec, '--no-audit', '--no-fund', '--loglevel=error'];
+  return process.platform === 'win32'
     ? spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm'].concat(args), { cwd: dir, encoding: 'utf8' })
     : spawnSync('npm', args, { cwd: dir, encoding: 'utf8' });
+}
+
+function installKryptheonIn(dir) {
+  console.log('  Installing kryptheon here - this usually takes under a minute.');
+  const result = npmInstallDev(dir, 'kryptheon');
   // Judged by what is on disk afterwards, not by npm's exit code alone.
   const ok = !result.error && result.status === 0 && project.kryptheonInstalledIn(dir);
   if (ok) {
@@ -2085,6 +2090,37 @@ function handToFolderCopy() {
     /* said as unknown */
   }
   const mine = packageVersion();
+
+  // An older copy is brought up to this one first. Found the day 0.1.18
+  // shipped: the fix was on the registry, `npx kryptheon@latest check` and
+  // every AI tool asked for it, and the folder's 0.1.17 ran anyway - the
+  // person would have had to type an npm command to get what they had
+  // already asked for. Never downwards: a folder that is ahead of a cached
+  // npx copy keeps what it has.
+  if (project.olderVersion(theirVersion, mine)) {
+    const root = path.dirname(path.dirname(theirs)); // <root>/node_modules/kryptheon
+    if (project.hasPackageJson(root)) {
+      console.log('');
+      console.log('  This folder has kryptheon ' + theirVersion + ' and this is ' + mine + '. Updating the folder\'s');
+      console.log('  copy, because your recordings load that one - usually under a minute.');
+      const result = npmInstallDev(root, 'kryptheon@' + mine);
+      let now = null;
+      try {
+        now = JSON.parse(fs.readFileSync(path.join(theirs, 'package.json'), 'utf8')).version;
+      } catch (err) {
+        now = null;
+      }
+      // Believed only when the folder now holds exactly this version.
+      if (!result.error && result.status === 0 && now === mine && project.kryptheonCopyFor(USER_DIR) === theirs) {
+        console.log('  Updated.');
+        theirVersion = now;
+      } else {
+        console.log('  Could not update it just now (no internet?), so the ' + (now || theirVersion) + ' that is here runs.');
+        if (now) theirVersion = now;
+      }
+    }
+  }
+
   if (theirVersion !== mine) {
     // Not an error: the folder's copy is the one its recordings are written
     // against. Said, so an older one is never mistaken for this one.

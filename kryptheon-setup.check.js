@@ -611,7 +611,142 @@ const cases = [
       }
     },
   },
+  {
+    name: '14. a folder with an older kryptheon is updated first, so @latest and every AI tool get the fix they asked for',
+    run: async () => {
+      // Found the day 0.1.18 shipped: the fix was on the registry, and in a
+      // folder record had set up with 0.1.17, `npx kryptheon@latest check`
+      // handed over to that 0.1.17 and the fix never ran.
+      const v = await registryPair();
+      if (!v) return ['could not ask the registry which versions exist'];
+      const dir = await folderWith(v.older, address);
+      const me = copyClaiming(v.latest);
+      try {
+        const r = await run([path.join(me, 'bin', 'kryptheon.js'), 'check'], { cwd: dir, timeout: 240000 });
+        const problems = [];
+        const now = (readJson(path.join(dir, 'node_modules', 'kryptheon', 'package.json')) || {}).version;
+        if (now !== v.latest) problems.push('the folder still has ' + now + ', not ' + v.latest + ':' + NL + r.out.slice(0, 900));
+        if (!/Updated\./.test(r.out)) problems.push('it did not say it updated:' + NL + r.out.slice(0, 900));
+        if (/installed in this folder \(/.test(r.out)) problems.push('it still says it ran an older copy');
+        if (!/1 working, 0 broken/.test(r.out)) problems.push('the recording did not run and pass after the update:' + NL + r.out.slice(0, 900));
+        const dep = ((readJson(path.join(dir, 'package.json')) || {}).devDependencies || {}).kryptheon || '';
+        if (dep.indexOf(v.latest) === -1) problems.push('package.json still asks for ' + dep);
+        return problems;
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(me, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: '15. the update cannot happen (no internet): the folder\'s own copy runs, and it says so',
+    run: async () => {
+      const v = await registryPair();
+      if (!v) return ['could not ask the registry which versions exist'];
+      const dir = await folderWith(v.older, address);
+      const me = copyClaiming(v.latest);
+      const before = fs.readFileSync(path.join(dir, 'package.json'), 'utf8');
+      try {
+        const offline = { npm_config_registry: 'http://127.0.0.1:1/', npm_config_fetch_retries: '0' };
+        const r = await run([path.join(me, 'bin', 'kryptheon.js'), 'check'], { cwd: dir, env: offline, timeout: 240000 });
+        const problems = [];
+        if (!/Could not update it just now/.test(r.out)) problems.push('it did not say the update failed:' + NL + r.out.slice(0, 900));
+        if (r.out.indexOf('installed in this folder (' + v.older + ')') === -1) problems.push('it did not say which copy ran');
+        if (!/1 working, 0 broken/.test(r.out)) problems.push('the recording did not still run:' + NL + r.out.slice(0, 900));
+        const now = (readJson(path.join(dir, 'node_modules', 'kryptheon', 'package.json')) || {}).version;
+        if (now !== v.older) problems.push('the folder now has ' + now);
+        if (fs.readFileSync(path.join(dir, 'package.json'), 'utf8') !== before) problems.push('package.json changed although nothing was updated');
+        if (looksLikeAStackTrace(r.out)) problems.push('a stack trace reached the person');
+        return problems;
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(me, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: '16. never downwards: an old cached copy leaves a newer folder exactly as it is',
+    run: async () => {
+      const v = await registryPair();
+      if (!v) return ['could not ask the registry which versions exist'];
+      const dir = await folderWith(v.older, address);
+      const me = copyClaiming('0.0.1');
+      const before = fs.readFileSync(path.join(dir, 'package.json'), 'utf8');
+      try {
+        const r = await run([path.join(me, 'bin', 'kryptheon.js'), 'check'], { cwd: dir, timeout: 240000 });
+        const problems = [];
+        if (/Updating/.test(r.out)) problems.push('it tried to change the folder\'s copy:' + NL + r.out.slice(0, 600));
+        const now = (readJson(path.join(dir, 'node_modules', 'kryptheon', 'package.json')) || {}).version;
+        if (now !== v.older) problems.push('the folder now has ' + now);
+        if (fs.readFileSync(path.join(dir, 'package.json'), 'utf8') !== before) problems.push('package.json changed');
+        if (!/1 working, 0 broken/.test(r.out)) problems.push('the recording did not run:' + NL + r.out.slice(0, 600));
+        return problems;
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(me, { recursive: true, force: true });
+      }
+    },
+  },
 ];
+
+// The two newest versions on the registry, asked once. The update checks
+// install real published versions: a check that only imagines an install is
+// the one that fails on somebody's laptop.
+let pair;
+function registryPair() {
+  if (pair !== undefined) return Promise.resolve(pair);
+  const args = ['view', 'kryptheon', 'versions', '--json'];
+  const r = process.platform === 'win32'
+    ? require('child_process').spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm'].concat(args), { encoding: 'utf8' })
+    : require('child_process').spawnSync('npm', args, { encoding: 'utf8' });
+  try {
+    const all = JSON.parse(r.stdout).filter((x) => /^\d+\.\d+\.\d+$/.test(x));
+    pair = all.length >= 2 ? { older: all[all.length - 2], latest: all[all.length - 1] } : null;
+  } catch (err) {
+    pair = null;
+  }
+  return Promise.resolve(pair);
+}
+
+// A folder set up by an older kryptheon, with one recording, installed once
+// and copied for each check that needs it.
+const olderFolders = {};
+async function folderWith(version, url) {
+  if (!olderFolders[version]) {
+    const dir = tmp('kryptheon-older-' + version.split('.').join('-') + '-');
+    write(dir, 'package.json', '{"name":"older","version":"1.0.0","private":true}');
+    const args = ['install', '--save-dev', 'kryptheon@' + version, '--no-audit', '--no-fund', '--loglevel=error'];
+    if (process.platform === 'win32') {
+      require('child_process').spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm'].concat(args), { cwd: dir });
+    } else {
+      require('child_process').spawnSync('npm', args, { cwd: dir });
+    }
+    write(dir, 'tests/recorded-20260926-120000.spec.js', [
+      "import { test, expect } from 'kryptheon/kryptheon-fixture';",
+      '',
+      "test('Press save', async ({ page }) => {",
+      '  await page.goto(' + JSON.stringify(url) + ');',
+      "  await page.getByRole('button', { name: 'Save' }).click();",
+      '});',
+      '',
+    ].join(NL));
+    olderFolders[version] = dir;
+  }
+  const copy = tmp('kryptheon-older-copy-');
+  fs.cpSync(olderFolders[version], copy, { recursive: true });
+  return copy;
+}
+
+// This repository, as if it were published as `version` - what npx would
+// have in its cache.
+function copyClaiming(version) {
+  const dir = tmp('kryptheon-claims-');
+  fs.cpSync(__dirname, dir, { recursive: true, filter: (p) => !/[\\/](\.git|test-results)([\\/]|$)/.test(p) });
+  const pkg = readJson(path.join(dir, 'package.json'));
+  pkg.version = version;
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(pkg, null, 2), 'utf8');
+  return dir;
+}
 
 (async () => {
   await startServer();
@@ -634,6 +769,7 @@ const cases = [
     }
   } finally {
     server.close();
+    for (const d of Object.values(olderFolders)) fs.rmSync(d, { recursive: true, force: true });
   }
 
   console.log('');

@@ -42,8 +42,11 @@ module.exports = defineConfig({
   // The tests belong to the user, so they are found in their folder.
   testDir: path.join(USER_DIR, 'tests'),
   // Screenshots and other artefacts default to sitting next to the config,
-  // which once installed means inside node_modules. Keep them with the user.
-  outputDir: path.join(USER_DIR, 'test-results'),
+  // which once installed means inside node_modules. They belong to the user's
+  // project, so they go to its store - outside the project, where a commit of
+  // "everything that changed" cannot pick them up. Playwright empties this
+  // folder at the start of every run, so it never grows.
+  outputDir: require(path.join(PACKAGE_DIR, 'kryptheon-store.js')).pathsFor(USER_DIR).testResults,
   // These tests all run against one live site, so in parallel they interfere
   // with each other - a shared logged-in session, and rate limiting on the
   // real endpoints. Serial is the safe default here.

@@ -16,6 +16,10 @@
 // This file sits outside testDir and does not match Playwright's testMatch
 // pattern, so `npx playwright test` ignores it.
 
+// Records from every run below go to a scratch store, never the real
+// ~/.kryptheon: this check makes throwaway projects by the dozen.
+process.env.KRYPTHEON_HOME = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'kryptheon-home-'));
+
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -680,6 +684,36 @@ const cases = [
         if (now !== v.older) problems.push('the folder now has ' + now);
         if (fs.readFileSync(path.join(dir, 'package.json'), 'utf8') !== before) problems.push('package.json changed');
         if (!/1 working, 0 broken/.test(r.out)) problems.push('the recording did not run:' + NL + r.out.slice(0, 600));
+        return problems;
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(me, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: '17. an older copy that cannot be updated is not run once the records have moved out of the project',
+    run: async () => {
+      // Every published version before the store reads its baselines from the
+      // project. Once they have moved out, such a copy would find none, take
+      // the recording as new and pass whatever the page does today.
+      const v = await registryPair();
+      if (!v) return ['could not ask the registry which versions exist'];
+      const dir = await folderWith(v.older, address);
+      const me = copyClaiming(v.latest);
+      const kept = require('./kryptheon-store.js').pathsFor(dir);
+      fs.mkdirSync(kept.dir, { recursive: true });
+      fs.writeFileSync(kept.baselines, '{}\n', 'utf8');
+      try {
+        const offline = { npm_config_registry: 'http://127.0.0.1:1/', npm_config_fetch_retries: '0' };
+        const r = await run([path.join(me, 'bin', 'kryptheon.js'), 'check'], { cwd: dir, env: offline, timeout: 240000 });
+        const problems = [];
+        if (r.code === 0) problems.push('it exited 0 although nothing was checked');
+        if (/working, \d+ broken/.test(r.out)) problems.push('the older copy ran anyway:' + NL + r.out.slice(0, 900));
+        if (r.out.indexOf(kept.dir) === -1) problems.push('it did not say where the records are now:' + NL + r.out.slice(0, 900));
+        if (!/npm i -D kryptheon@latest/.test(r.out)) problems.push('it did not give the one command that fixes it');
+        if (fs.existsSync(path.join(dir, 'kryptheon-baselines.json'))) problems.push('a baseline appeared in the project');
+        if (looksLikeAStackTrace(r.out)) problems.push('a stack trace reached the person');
         return problems;
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });

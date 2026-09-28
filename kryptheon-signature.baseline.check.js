@@ -16,6 +16,13 @@
 // This file sits outside testDir and does not match Playwright's testMatch
 // pattern, so `npx playwright test` ignores it.
 
+// Records from every run below go to a scratch store, never the real
+// ~/.kryptheon: this check makes throwaway projects by the dozen.
+process.env.KRYPTHEON_HOME = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'kryptheon-home-'));
+// Where the real command keeps a project's baselines: its store, not the project.
+const store = require('./kryptheon-store.js');
+const baselinesOf = (dir) => store.pathsFor(dir).baselines;
+
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -96,7 +103,7 @@ function runCheck(dir, url) {
 }
 
 function baselineFile(dir) {
-  return path.join(dir, 'kryptheon-baselines.json');
+  return baselinesOf(dir);
 }
 
 function readBaseline(dir) {
@@ -127,6 +134,9 @@ function readBaseline(dir) {
   fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"demo","version":"1.0.0"}', 'utf8');
   fs.mkdirSync(path.join(dir, 'tests'));
   fs.writeFileSync(path.join(dir, 'tests', 'login.spec.js'), SPEC, 'utf8');
+  // A project with a .gitignore of its own and no password anywhere: nothing
+  // of Kryptheon's belongs in it, not even a .env line.
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\n', 'utf8');
 
   const results = [];
   const record = (name, problems, detail) => results.push({ name, problems, detail });
@@ -230,6 +240,79 @@ function readBaseline(dir) {
       })(),
       afterFourth && afterFourth.signature ? 'learned' : 'not learned',
     );
+
+    // (e) four real runs later, one of them a failure: nothing of Kryptheon's
+    // is in the project. Everything it remembers is in the project's store.
+    const left = fs.readdirSync(dir).sort();
+    const kept = store.pathsFor(dir);
+    const runs = fs.existsSync(kept.history) ? fs.readFileSync(kept.history, 'utf8').split('\n').filter(Boolean).length : 0;
+    record(
+      'e. the project holds only what the person made; the records are in its store',
+      (() => {
+        const problems = [];
+        if (left.join(',') !== '.gitignore,package.json,tests') problems.push('the project now holds: ' + left.join(', '));
+        if (fs.readFileSync(path.join(dir, '.gitignore'), 'utf8') !== 'node_modules/\n') problems.push('the project\'s .gitignore was changed');
+        if (path.relative(dir, kept.dir).split(path.sep)[0] !== '..') problems.push('the store is inside the project');
+        if (!fs.existsSync(kept.baselines)) problems.push('no baselines in the store');
+        if (runs !== 4) problems.push('the store\'s history has ' + runs + ' runs, not 4');
+        if (!/History saved outside your project/.test(fourth.stdout)) problems.push('the run did not say where the history went');
+        return problems;
+      })(),
+      left.join(', ') + ' | ' + runs + ' runs in ' + path.basename(kept.dir),
+    );
+
+    // (f) a project from before the store: its baseline sits in the project,
+    // and the login is broken today. The move must not cost the comparison -
+    // a baseline lost on the way reads as "first run, all fine".
+    const old = fs.mkdtempSync(path.join(os.tmpdir(), 'kryptheon-baseline-old-'));
+    try {
+      fs.writeFileSync(path.join(old, 'package.json'), '{"name":"old","version":"1.0.0"}', 'utf8');
+      fs.mkdirSync(path.join(old, 'tests'));
+      fs.writeFileSync(path.join(old, 'tests', 'login.spec.js'), SPEC, 'utf8');
+      const legacyBaselines = fs.readFileSync(kept.baselines, 'utf8');
+      const legacyRun = '{"runAt":"2026-09-01T10:00:00.000Z","status":"passed","passed":1,"failed":0,"tests":[]}\n';
+      fs.writeFileSync(path.join(old, 'kryptheon-baselines.json'), legacyBaselines, 'utf8');
+      fs.writeFileSync(path.join(old, 'kryptheon-history.jsonl'), legacyRun, 'utf8');
+      fs.mkdirSync(path.join(old, 'test-results'));
+      fs.writeFileSync(path.join(old, 'test-results', '.last-run.json'), '{"status":"passed"}', 'utf8');
+
+      broken = true;
+      const moved = await runCheck(old, url);
+      dump('f. older project, broken login', moved);
+      const oldKept = store.pathsFor(old);
+      const history = fs.existsSync(oldKept.history) ? fs.readFileSync(oldKept.history, 'utf8').split('\n').filter(Boolean) : [];
+      record(
+        'f. an older project\'s records move out, and its baseline still catches the broken login',
+        (() => {
+          const problems = [];
+          if (moved.status === 0) problems.push('the broken login passed: the moved baseline was not used');
+          if (!/ended up somewhere different than before/.test(moved.stdout)) problems.push('the reason was not the baseline:\n' + moved.stdout.slice(0, 600));
+          if (!/Moved out of this folder/.test(moved.stdout)) problems.push('the move was not said');
+          const now = fs.readdirSync(old).sort().join(',');
+          if (now !== 'package.json,tests') problems.push('the project still holds: ' + now);
+          if (history[0] !== legacyRun.trim()) problems.push('the old history did not come along first');
+          if (history.length !== 2) problems.push('history has ' + history.length + ' runs, not the old one plus this one');
+          return problems;
+        })(),
+        'exit ' + moved.status,
+      );
+
+      // (g) the next run says nothing about moving: there is nothing left to move.
+      broken = false;
+      const next = await runCheck(old, url);
+      record(
+        'g. the move happens once',
+        (() => {
+          const problems = [];
+          if (/Moved out of this folder/.test(next.stdout)) problems.push('it said it moved something again');
+          if (next.status !== 0) problems.push('the fixed login did not pass: exit ' + next.status);
+          return problems;
+        })(),
+        'exit ' + next.status,
+      );
+    } finally {
+      fs.rmSync(old, { recursive: true, force: true });
+    }
   } finally {
     server.close();
     try {

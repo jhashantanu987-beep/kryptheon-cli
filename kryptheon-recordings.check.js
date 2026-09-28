@@ -15,6 +15,12 @@
 // This file sits outside testDir and does not match Playwright's testMatch
 // pattern, so `npx playwright test` ignores it.
 
+// Records from every run below go to a scratch store, never the real
+// ~/.kryptheon: this check makes throwaway projects by the dozen.
+process.env.KRYPTHEON_HOME = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'kryptheon-home-'));
+// Where the real command keeps a project's baselines: its store, not the project.
+const baselinesOf = (dir) => require('./kryptheon-store.js').pathsFor(dir).baselines;
+
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -350,8 +356,9 @@ const cases = [
     run: () => {
       const dir = project({ 'alpha.spec.js': spec('Alpha'), 'beta.spec.js': spec('Beta') });
       try {
+        fs.mkdirSync(require('path').dirname(baselinesOf(dir)), { recursive: true });
         fs.writeFileSync(
-          path.join(dir, 'kryptheon-baselines.json'),
+          baselinesOf(dir),
           JSON.stringify(
             {
               'tests/alpha.spec.js :: Alpha': { url: '/a', title: 'A' },
@@ -363,7 +370,7 @@ const cases = [
           'utf8',
         );
         run(dir, ['remove', 'beta.spec.js']);
-        const after = JSON.parse(fs.readFileSync(path.join(dir, 'kryptheon-baselines.json'), 'utf8'));
+        const after = JSON.parse(fs.readFileSync(baselinesOf(dir), 'utf8'));
         const keys = Object.keys(after);
         const problems = [];
         if (keys.indexOf('tests/beta.spec.js :: Beta') !== -1) {

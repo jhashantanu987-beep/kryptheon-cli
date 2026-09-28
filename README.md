@@ -161,20 +161,28 @@ wanted, and one new name of the same kind. A button that is gone with nothing
 in its place, or a rename next to other new buttons, fails as it always did.
 Checks you added with the toolbar are never redirected.
 
-## Files it creates in your folder
+## What goes where
 
-| File | What it is |
-| --- | --- |
-| `tests/` | your recordings |
-| `kryptheon-baselines.json` | the remembered result for each test |
-| `kryptheon-history.jsonl` | one line per run, used for "this was working on …" |
+Only your recordings go in your project, in `tests/`. Everything Kryptheon
+remembers about the project is kept outside it, so it can never end up in your
+repo:
+
+    ~/.kryptheon/projects/<folder-name>-<id>/
+      baselines.json   the remembered result for each test
+      history.jsonl    one line per run, used for "this was working on …"
+      test-results/    the screenshot of the last failure
+
+Set `KRYPTHEON_HOME` to keep them somewhere else. Each project folder gets its
+own store, so two projects are never mixed. A project folder that is moved or
+renamed starts a new store.
+
+Older versions kept `kryptheon-baselines.json`, `kryptheon-history.jsonl` and
+`test-results/` in the project. The first run of this version moves them out,
+once, and says so.
 
 A `.env` in the same folder is loaded automatically, and anything you type into a
 password box is replaced with an environment variable rather than written into
-the test.
-
-Worth adding to `.gitignore`: `.env`, `kryptheon-baselines.json`,
-`kryptheon-history.jsonl`, `test-results/`.
+the test. When there is a password, `.env` is added to an existing `.gitignore`.
 
 ## Requirements
 

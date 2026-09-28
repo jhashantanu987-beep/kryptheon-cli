@@ -1,20 +1,29 @@
 // Plain-language Playwright reporter for non-technical readers.
 // Prints a short line per passing test and a readable block per failure,
-// and appends one JSON line per run to kryptheon-history.jsonl.
+// and appends one JSON line per run to the project's history.jsonl.
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const recordings = require('./kryptheon-recordings.js');
 const heal = require('./kryptheon-heal.js');
+const store = require('./kryptheon-store.js');
 
 // An assistant runs this after every change, so it needs a mode that says
 // nothing at all when the news is good.
 const QUIET = !!process.env.KRYPTHEON_QUIET;
 
-// The history belongs to whoever is running the tests, so it lives in their
-// folder - not inside the installed package.
+// The history belongs to whoever is running the tests, so it is kept in their
+// project's store - not inside the installed package, and not in the project.
 const USER_DIR = process.cwd();
-const HISTORY_FILE = path.join(USER_DIR, 'kryptheon-history.jsonl');
+const HISTORY_FILE = store.pathsFor(USER_DIR).history;
+
+// Said with ~ for the home folder: the full path is long, and the person only
+// needs to know it is outside their project and where to look.
+function shortHome(file) {
+  const home = os.homedir();
+  return file.toLowerCase().startsWith(home.toLowerCase() + path.sep) ? '~' + file.slice(home.length) : file;
+}
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sept', 'Oct', 'Nov', 'Dec'];
 
@@ -962,10 +971,13 @@ class KryptheonReporter {
     };
 
     // Append only - existing lines are never rewritten.
+    let saved = false;
     try {
+      fs.mkdirSync(path.dirname(HISTORY_FILE), { recursive: true });
       fs.appendFileSync(HISTORY_FILE, JSON.stringify(entry) + '\n', 'utf8');
+      saved = true;
     } catch (err) {
-      process.stdout.write('\n(could not write ' + path.basename(HISTORY_FILE) + ': ' + err.message + ')\n');
+      process.stdout.write('\n(could not write ' + shortHome(HISTORY_FILE) + ': ' + err.message + ')\n');
     }
 
     // "Broken" is kept for recordings that used to work. The ones that never
@@ -1011,7 +1023,7 @@ class KryptheonReporter {
 
     process.stdout.write(
       '\n' + recordings.summaryLines(counts).join('\n') + '\n' +
-      'History saved to ' + path.basename(HISTORY_FILE) + '\n\n'
+      (saved ? 'History saved outside your project, in ' + shortHome(HISTORY_FILE) + '\n' : '') + '\n'
     );
 
     // Once per run, not once per test: it is one fact about the app, and

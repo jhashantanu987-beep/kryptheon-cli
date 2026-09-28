@@ -5,8 +5,11 @@
 //
 // Two roots matter, and they are not the same once this is installed:
 //   PACKAGE_DIR - the tool's own files (fixture, reporter, config, this file)
-//   USER_DIR    - the folder the command was run in, which owns tests/,
-//                 kryptheon-baselines.json, kryptheon-history.jsonl and .env
+//   USER_DIR    - the folder the command was run in, which owns tests/ and .env
+//
+// Everything Kryptheon remembers about USER_DIR - baselines, history, the last
+// run's screenshots - is kept in its store under ~/.kryptheon, never in the
+// project (kryptheon-store.js).
 
 const fs = require('fs');
 const path = require('path');
@@ -19,6 +22,11 @@ const recordings = require('../kryptheon-recordings.js');
 const cleanup = require('../kryptheon-cleanup.js');
 const baselines = require('../kryptheon-baselines.js');
 const project = require('../kryptheon-project.js');
+const store = require('../kryptheon-store.js');
+
+// The first version that keeps its records in the store. An older copy in a
+// project folder still looks for them inside the project.
+const FIRST_STORE_VERSION = '0.1.20';
 
 const PACKAGE_DIR = path.join(__dirname, '..');
 const USER_DIR = process.cwd();
@@ -864,13 +872,47 @@ function takeOutSecrets(relativeFile) {
   return writeSpec(relativeFile, result.source) ? result.replacements : [];
 }
 
-// kryptheon leaves a password file and three files of machine state in the
-// project. If there is already a .gitignore, they belong in it.
-function keepArtefactsOutOfGit() {
+// The password file is the one thing of kryptheon's in a project that must not
+// be committed. If there is already a .gitignore, it belongs in it - but only
+// once there is a password to protect: a .env here, or a recording that just
+// had one taken out. A landing page with no sign-in has nothing to hide, and
+// an edit to its .gitignore would be one more change of Kryptheon's in the repo.
+function keepArtefactsOutOfGit(passwordTakenOut) {
+  if (!passwordTakenOut && !fs.existsSync(path.join(USER_DIR, '.env'))) return;
   const added = secrets.updateGitignore(USER_DIR);
   if (!added.length) return;
   console.log('  Added to .gitignore: ' + added.join(', '));
   console.log('');
+}
+
+// The project's store, opened before anything reads a record, so whatever an
+// older version left in this folder is moved out first - and said once, here,
+// rather than by the fixture or the reporter, which run inside the test runner.
+//
+// Returns null when the store cannot be made. Carrying on would mean every
+// recording is compared against nothing, which reads as "all fine" and is
+// the one answer that must never be given by accident.
+function openStore() {
+  let opened;
+  try {
+    opened = store.open(USER_DIR);
+  } catch (err) {
+    console.error('');
+    console.error('  Kryptheon keeps what it remembers about this project in');
+    console.error('    ' + store.dirFor(USER_DIR));
+    console.error('  and could not write there: ' + err.message);
+    console.error('');
+    console.error('  Without it every recording would look new, so nothing was checked.');
+    console.error('  Set KRYPTHEON_HOME to a folder you can write to, and run this again.');
+    console.error('');
+    return null;
+  }
+  const lines = store.migrationLines(opened);
+  if (lines.length) {
+    console.log('');
+    for (const line of lines) console.log(line);
+  }
+  return opened;
 }
 
 function reportSecrets(replacements) {
@@ -1170,7 +1212,7 @@ async function finaliseRecording(outFile, context) {
 
     reportTidying(tidied);
     reportSecrets(secrets);
-    keepArtefactsOutOfGit();
+    keepArtefactsOutOfGit(!!(secrets && secrets.length));
     await offerToDropLogout(named);
     reportReplayRisks(named);
     reportFragileSelectors(named);
@@ -1321,6 +1363,7 @@ async function remove(name) {
     console.error("");
     return 1;
   }
+  if (!openStore()) return 1;
 
   const gone = [];
   const failed = [];
@@ -1494,6 +1537,9 @@ async function record(url) {
   // gets a folder set up; before the browser, which is the expensive part.
   const setup = await prepareFolder(url);
   if (setup !== null) return setup;
+  // Before an old recording can be replaced, because replacing one also drops
+  // its saved result - which has to be found where it now lives.
+  if (!openStore()) return 1;
 
   if (!ensureBrowser()) return 1;
 
@@ -1705,6 +1751,7 @@ function check(options) {
     for (const line of project.noProjectLines(here)) console.error(line);
     return 1;
   }
+  if (!openStore()) return 1;
 
   // Deliberately not a failure. An assistant told to run this after every
   // change will read a non-zero exit as "something broke" and start fixing
@@ -1983,6 +2030,9 @@ function listBaselines(api) {
 }
 
 function accept(name) {
+  // Only where there are recordings: anywhere else there is nothing to accept,
+  // and no reason to make a store for a folder that is not a project.
+  if (fs.existsSync(TESTS_DIR) && !openStore()) return 1;
   const api = baselineApi();
   if (!api) return 1;
   if (!name) return listBaselines(api);
@@ -2118,6 +2168,26 @@ function handToFolderCopy() {
         console.log('  Could not update it just now (no internet?), so the ' + (now || theirVersion) + ' that is here runs.');
         if (now) theirVersion = now;
       }
+    }
+  }
+
+  // A copy from before the store looks for its records inside the project. If
+  // they have already moved out, it finds none, takes every recording as new,
+  // and learns whatever the app does today as correct - a broken page would
+  // pass. So it is not run; the one fix is to bring it up to date.
+  if (project.olderVersion(theirVersion, FIRST_STORE_VERSION)) {
+    const kept = store.pathsFor(USER_DIR);
+    if (fs.existsSync(kept.baselines) || fs.existsSync(kept.history)) {
+      console.error('');
+      console.error('  This folder has kryptheon ' + theirVersion + ', which looks for its saved results');
+      console.error('  inside the project. They have moved out, to');
+      console.error('    ' + kept.dir);
+      console.error('  so ' + theirVersion + ' would see none, treat every recording as new, and could');
+      console.error('  miss a real change. Nothing was checked. Update this folder\'s copy:');
+      console.error('    npm i -D kryptheon@latest');
+      console.error('  then run this again.');
+      console.error('');
+      return 1;
     }
   }
 

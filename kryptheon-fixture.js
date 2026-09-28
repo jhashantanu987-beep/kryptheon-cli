@@ -26,10 +26,13 @@ const heal = require('./kryptheon-heal.js');
 
 const MAX_ITEMS = 5; // keep the failure block readable
 
-// Baselines describe the user's app, so they live in the folder the command
-// was run from - never inside the installed package.
+const store = require('./kryptheon-store.js');
+
+// Baselines describe the user's app, so they belong to the folder the command
+// was run from - but they are kept in that folder's store, outside it, so the
+// project's repo never grows because Kryptheon is watching it.
 const USER_DIR = process.cwd();
-const BASELINE_FILE = path.join(USER_DIR, 'kryptheon-baselines.json');
+const BASELINE_FILE = store.pathsFor(USER_DIR).baselines;
 
 function oneLine(text) {
   return String(text).replace(/\s+/g, ' ').trim();
@@ -78,6 +81,7 @@ function saveBaselines(file, all) {
   try {
     // Explicit, and without a byte order mark: this file is read back by the
     // same code and by people, and a mismatch would look like the app changed.
+    fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify(all, null, 2) + '\n', { encoding: 'utf8' });
     return true;
   } catch (e) {

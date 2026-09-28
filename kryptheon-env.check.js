@@ -20,6 +20,12 @@
 // This file sits outside testDir and does not match Playwright's testMatch
 // pattern, so `npx playwright test` ignores it.
 
+// Records from every run below go to a scratch store, never the real
+// ~/.kryptheon: this check makes throwaway projects by the dozen.
+process.env.KRYPTHEON_HOME = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'kryptheon-home-'));
+// Where the real command keeps a project's baselines: its store, not the project.
+const baselinesOf = (dir) => require('./kryptheon-store.js').pathsFor(dir).baselines;
+
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -118,7 +124,7 @@ function run(dir, url, extraEnv) {
  */
 function signedInHeadings(dir) {
   try {
-    const all = JSON.parse(fs.readFileSync(path.join(dir, 'kryptheon-baselines.json'), 'utf8'));
+    const all = JSON.parse(fs.readFileSync(baselinesOf(dir), 'utf8'));
     const entry = all['tests/login.spec.js :: Login flow'];
     return (entry && entry.signature && entry.signature.headings) || [];
   } catch (e) {
@@ -249,7 +255,7 @@ function project(files) {
       if (uni.status !== 0) problems.push('the run did not pass: exit ' + uni.status);
       let bytes;
       try {
-        bytes = fs.readFileSync(path.join(unicode, 'kryptheon-baselines.json'));
+        bytes = fs.readFileSync(baselinesOf(unicode));
       } catch (e) {
         return ['no baseline file was written: ' + e.message];
       }
@@ -268,7 +274,7 @@ function project(files) {
     const bom = project({ 'tests/login.spec.js': SECRET_SPEC });
     dirs.push(bom);
     const first = await run(bom, url, { KRYPTHEON_PASSWORD: 'hunter2' });
-    const baselineFile = path.join(bom, 'kryptheon-baselines.json');
+    const baselineFile = baselinesOf(bom);
     const before = fs.readFileSync(baselineFile, 'utf8');
     fs.writeFileSync(baselineFile, '﻿' + before, 'utf8');
     const afterBom = await run(bom, url, { KRYPTHEON_PASSWORD: 'hunter2' });
@@ -342,7 +348,13 @@ function project(files) {
       for (const entry of secretsModule.GITIGNORE_ENTRIES) {
         if (!added.includes(entry)) problems.push('did not add ' + entry);
       }
+      if (!added.includes('.env')) problems.push('the password file is not kept out of git');
       const body = fs.readFileSync(path.join(dir, '.gitignore'), 'utf8');
+      // Kryptheon's records live outside the project now, so naming them here
+      // would only be one more line of Kryptheon's in somebody's repo.
+      for (const gone of ['kryptheon-baselines.json', 'kryptheon-history.jsonl', 'test-results']) {
+        if (body.indexOf(gone) !== -1) problems.push('it still adds ' + gone + ', which is no longer written here');
+      }
       if (body.indexOf('node_modules') === -1) problems.push('it lost what was already there');
       // Running again finds nothing missing, so the file stops growing.
       if (secretsModule.updateGitignore(dir).length) problems.push('it added the entries a second time');

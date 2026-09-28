@@ -7,6 +7,11 @@
 // This file sits outside testDir and does not match Playwright's testMatch
 // pattern, so `npx playwright test` ignores it.
 
+// The runs driven through the reporter below write history like real ones do.
+// It goes to a scratch store, never the real ~/.kryptheon - and it has to be
+// set before the reporter is loaded, which is when it decides where to write.
+process.env.KRYPTHEON_HOME = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'kryptheon-home-'));
+
 const Reporter = require('./kryptheon-reporter.js');
 
 const E = '\u001b';

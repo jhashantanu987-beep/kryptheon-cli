@@ -139,9 +139,11 @@ function writeEnvExample(dir, names) {
   }
 }
 
-// Everything kryptheon leaves in a project that should not be committed: the
-// real password, and three files that are machine state rather than source.
-const GITIGNORE_ENTRIES = ['.env', 'kryptheon-baselines.json', 'kryptheon-history.jsonl', 'test-results/'];
+// What must never be committed from a project: the real password. The three
+// files of machine state that used to be listed here - baselines, history and
+// test-results/ - are no longer written into the project at all; they live in
+// its store (kryptheon-store.js), so there is nothing of Kryptheon's to ignore.
+const GITIGNORE_ENTRIES = ['.env'];
 
 /**
  * Adds the missing entries to an existing .gitignore. Returns what it added.

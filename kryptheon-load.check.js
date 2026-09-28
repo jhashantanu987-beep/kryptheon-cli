@@ -18,6 +18,10 @@
 // This file sits outside testDir and does not match Playwright's testMatch
 // pattern, so `npx playwright test` ignores it.
 
+// Records from every run below go to a scratch store, never the real
+// ~/.kryptheon: this check makes throwaway projects by the dozen.
+process.env.KRYPTHEON_HOME = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'kryptheon-home-'));
+
 const fs = require('fs');
 const http = require('http');
 const os = require('os');

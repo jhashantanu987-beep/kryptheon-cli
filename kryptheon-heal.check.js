@@ -16,6 +16,12 @@
 // This file sits outside testDir and does not match Playwright's testMatch
 // pattern, so `npx playwright test` ignores it.
 
+// Records from every run below go to a scratch store, never the real
+// ~/.kryptheon: this check makes throwaway projects by the dozen.
+process.env.KRYPTHEON_HOME = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'kryptheon-home-'));
+// Where the real command keeps a project's baselines: its store, not the project.
+const baselinesOf = (dir) => require('./kryptheon-store.js').pathsFor(dir).baselines;
+
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -125,7 +131,7 @@ function runCheck(dir, url, args) {
 
 function baseline(dir, key) {
   try {
-    return JSON.parse(fs.readFileSync(path.join(dir, 'kryptheon-baselines.json'), 'utf8'))[key] || null;
+    return JSON.parse(fs.readFileSync(baselinesOf(dir), 'utf8'))[key] || null;
   } catch (e) {
     return null;
   }
@@ -296,7 +302,7 @@ const ANY_RENAME = /Renamed/;
     const old = project('kryptheon-heal-old-', 'menu.spec.js', MENU_SPEC);
     const OLD_KEY = 'tests/menu.spec.js :: Menu';
     const oldFirst = await runCheck(old, url);
-    const file = path.join(old, 'kryptheon-baselines.json');
+    const file = baselinesOf(old);
     const all = JSON.parse(fs.readFileSync(file, 'utf8'));
     delete all[OLD_KEY].steps; // as every baseline written by 0.1.17 and before
     fs.writeFileSync(file, JSON.stringify(all, null, 2), 'utf8');

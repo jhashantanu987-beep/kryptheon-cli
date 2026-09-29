@@ -23,6 +23,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const store = require('./kryptheon-store.js');
+const changes = require('./kryptheon-changes.js');
 
 /**
  * Every check the dashboard knows the name of, in the order the person asked
@@ -126,6 +127,48 @@ function recentChanges(root) {
   };
 }
 
+/** When this flow last passed, from the run history, or null. */
+function lastPassOf(history, title) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const t = (history[i].tests || []).find((x) => x.title === title);
+    if (t && t.status === 'passed') return history[i].runAt;
+  }
+  return null;
+}
+
+/**
+ * The fix prompt for a broken recorded flow, from what the run kept: what was
+ * seen, what was expected, where, the evidence, and how to see it again. Only
+ * what the run recorded is said; nothing is guessed.
+ */
+function flowPrompt(t, lastPass) {
+  const f = t.failure || {};
+  const o = f.observations || {};
+  const file = String(f.file || t.specFile || 'tests').split('\\').join('/');
+  const extra = String(f.rawMessage || '').split(/\r?\n/).slice(1)
+    .map((l) => l.trim()).filter((l) => l && !/^\s*at\s/.test(l) && l.length < 200).slice(0, 6);
+  const lines = [
+    'My app has a broken flow. Please fix the app - and nothing else.',
+    '',
+    'Kryptheon replayed the recorded flow "' + t.title + '" (' + file + (f.line ? ', line ' + f.line : '') + ') and it failed.',
+    '',
+    'Observed: ' + (f.plainLanguage || 'the replay failed'),
+  ].concat(extra.map((l) => '  ' + l), [
+    'Expected: the same result as ' + (lastPass ? 'the last time it passed (' + lastPass + ')' : 'when it was recorded') + '.',
+  ]);
+  if (o.url) lines.push('Where: the browser was on ' + o.url + (o.pageShowed ? ', and the page showed ' + o.pageShowed : '') + '.');
+  if (f.locator) lines.push('Step that failed: ' + f.locator);
+  if (o.failedRequests && o.failedRequests.length) lines.push('Failed requests: ' + o.failedRequests.slice(0, 5).map((r) => (r.method || 'GET') + ' ' + (r.path || r.url) + ' -> ' + r.status).join('; '));
+  if (o.consoleErrors && o.consoleErrors.length) lines.push('Console errors: ' + o.consoleErrors.slice(0, 3).join(' | '));
+  if (f.screenshot) lines.push('Evidence: a screenshot of the failure at ' + f.screenshot);
+  lines.push('');
+  lines.push('To see it yourself: open ' + (o.url || 'the app') + ' and repeat the steps in ' + file + ', or run  npx kryptheon check');
+  lines.push('');
+  lines.push('Fix the app so this flow works again. Do not edit the recording to make it pass. If the new behaviour ' +
+    'is intended, say so instead of changing code - it can be accepted with  npx kryptheon accept "' + t.title + '"');
+  return lines.join('\n');
+}
+
 function countRecordings(root) {
   try {
     return fs.readdirSync(path.join(root, 'tests')).filter((n) => /\.(spec|test)\.[cm]?[jt]s$/.test(n)).length;
@@ -166,10 +209,7 @@ function buildState(root, env) {
           (t.failure && t.failure.line ? ':' + t.failure.line : ''),
         headline: 'The recorded flow "' + t.title + '" broke.',
         detail: (t.failure && t.failure.plainLanguage) || '',
-        // The run's history keeps what broke, not the paste-ready prompt; the
-        // terminal report has that. Said on the page rather than invented here.
-        fixPrompt: '',
-        fixWhere: 'npx kryptheon check prints the prompt for this one',
+        fixPrompt: flowPrompt(t, lastPassOf(history, t.title)),
         when: lastRun.runAt,
       });
     }
@@ -219,6 +259,23 @@ function buildState(root, env) {
   findings.sort((a, b) => (rank[a.severity] ?? 9) - (rank[b.severity] ?? 9) ||
     (a.status === 'confirmed' ? 0 : 1) - (b.status === 'confirmed' ? 0 : 1));
 
+  // Every finding gets a short id and the last word of its fix prompt: how to
+  // prove the fix. Added here, where the loop lives, so every check's prompt
+  // ends the same way and the detection code itself stays untouched.
+  const attempts = readHistory(paths.fixes, 500);
+  for (const f of findings) {
+    f.id = changes.findingId(f);
+    f.attempts = attempts.filter((a) => a.id === f.id).map((a) => ({ at: a.at, verdict: a.verdict, why: a.why || '', newProblems: (a.newProblems || []).length }));
+    if (f.fixPrompt) {
+      f.fixPrompt += '\n\nWhen you have fixed it, prove it: run  npx kryptheon recheck ' + f.id +
+        '  (or press Re-check on this finding in the Kryptheon dashboard). It is fixed only when that says FIXED.';
+    }
+  }
+  // Fixes that were proven, newest first, while their finding is still gone.
+  const open = new Set(findings.map((f) => f.id));
+  const proven = attempts.filter((a) => a.verdict === 'fixed' && !open.has(a.id)).reverse().slice(0, 10)
+    .map((a) => ({ id: a.id, at: a.at, where: a.where, headline: a.headline, newProblems: (a.newProblems || []).length }));
+
   const recordings = countRecordings(root);
   const checks = CHECKS.map((c) => {
     let state;
@@ -254,6 +311,7 @@ function buildState(root, env) {
   return {
     project: { name: path.basename(root), root: root, storeDir: paths.dir },
     looks: looks,
+    proven: proven,
     checks: checks,
     findings: findings,
     runs: history.slice().reverse().map((r) => ({ runAt: r.runAt, status: r.status, passed: r.passed, failed: r.failed, durationMs: r.durationMs })),
@@ -327,6 +385,17 @@ function createServer(root, options) {
           const r = setCheck(store.pathsFor(root, env), String(input.id || ''), input.on);
           return json(res, r.ok ? 200 : 400, r);
         }
+        if (url.pathname === '/api/recheck' && typeof opts.recheck === 'function') {
+          const id = String(input.id || '');
+          if (!/^[0-9a-f]{8}$/.test(id)) return json(res, 400, { ok: false, why: 'not a finding id' });
+          if (!buildState(root, env).findings.some((f) => f.id === id)) return json(res, 404, { ok: false, why: 'no open finding with that id' });
+          if (running) return json(res, 409, { ok: false, why: 'a run is already going' });
+          running = true;
+          return Promise.resolve(opts.recheck(id)).finally(() => { running = false; }).then(
+            (r) => json(res, r && r.verdict ? 200 : 500, Object.assign({ ok: !!(r && r.verdict) }, r || {})),
+            (err) => json(res, 500, { ok: false, why: err.message }),
+          );
+        }
         if (url.pathname === '/api/run' && typeof opts.run === 'function') {
           const id = String(input.id || '');
           const check = buildState(root, env).checks.find((c) => c.id === id);
@@ -370,6 +439,7 @@ function createServer(root, options) {
 module.exports = {
   CHECKS: CHECKS,
   buildState: buildState,
+  flowPrompt: flowPrompt,
   readConfig: readConfig,
   setCheck: setCheck,
   createServer: createServer,

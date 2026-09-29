@@ -84,12 +84,36 @@ check('findings from all three checks arrive, each with severity, status, eviden
   return p;
 })());
 
-check('a broken recording is not given an invented fix prompt', (() => {
+check('a broken recording gets a fix prompt built only from what the run recorded', (() => {
   const reg = state.findings.find((f) => f.check === 'regression');
   if (!reg) return ['no regression finding'];
   const p = [];
-  if (reg.fixPrompt) p.push('a prompt appeared that the run never wrote: ' + reg.fixPrompt);
-  if (!/npx kryptheon check/.test(reg.fixWhere || '')) p.push('it does not say where the real prompt is');
+  const t = reg.fixPrompt || '';
+  if (!/Observed: Could not find the Pay button on the page\./.test(t)) p.push('the observed failure is not in it');
+  if (!/tests\/checkout\.spec\.js, line 7/.test(t)) p.push('the recording and line are not in it');
+  if (!/last time it passed \(2026-09-28T10:00:00\.000Z\)/.test(t)) p.push('the last pass is not in it');
+  if (!/Do not edit the recording/.test(t)) p.push('it does not forbid editing the recording to pass');
+  if (!/npx kryptheon recheck [0-9a-f]{8}/.test(t)) p.push('it does not end with how to prove the fix');
+  // This run kept no address, requests, errors or screenshot: none may appear.
+  for (const [re, what] of [[/Where: the browser/, 'an address'], [/Failed requests/, 'failed requests'], [/Console errors/, 'console errors'], [/screenshot/i, 'a screenshot']]) {
+    if (re.test(t)) p.push('it mentions ' + what + ' the run never recorded');
+  }
+  return p;
+})());
+
+check('when the run kept more evidence, the prompt carries it', (() => {
+  const t = { title: 'Pay', status: 'failed', specFile: 'tests/pay.spec.js', failure: {
+    file: 'tests\\pay.spec.js', line: 4, locator: "getByRole('button', { name: 'Pay' })",
+    plainLanguage: 'Could not find the Pay button on the page.',
+    rawMessage: 'Error: locator.click\nHeadings that are gone: "Total"',
+    screenshot: 'C:/store/test-results/pay/test-failed-1.png',
+    observations: { url: 'http://localhost:3000/cart', pageShowed: '"Cart"', failedRequests: [{ method: 'POST', path: '/api/pay', status: 500 }], consoleErrors: ['TypeError: x is undefined'] },
+  } };
+  const prompt = dashboard.flowPrompt(t, null);
+  const p = [];
+  for (const want of ['http://localhost:3000/cart', 'POST /api/pay -> 500', 'TypeError: x is undefined', 'test-failed-1.png', 'Headings that are gone: "Total"', "getByRole('button', { name: 'Pay' })", 'when it was recorded']) {
+    if (prompt.indexOf(want) === -1) p.push('missing: ' + want);
+  }
   return p;
 })());
 
@@ -140,12 +164,18 @@ check("the dashboard's own page and code have nothing to report to the frontend 
   return r.findings.map((f) => f.file + ':' + f.line + ' ' + f.sink + ' ' + f.expression);
 })());
 
+// Every request gives up after 10s and says so: a server that never answers
+// is a failure, and a check that waits for it for ever reports nothing at all.
 function request(port, options, body) {
   return new Promise((resolve) => {
     const req = http.request(Object.assign({ host: '127.0.0.1', port: port }, options), (res) => {
       let data = '';
       res.on('data', (c) => (data += c));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+    });
+    req.setTimeout(10000, () => {
+      req.destroy();
+      resolve({ status: -1, body: 'no answer within 10s', headers: {} });
     });
     req.on('error', (err) => resolve({ status: 0, body: err.message, headers: {} }));
     if (body) req.write(body);
@@ -241,6 +271,46 @@ function request(port, options, body) {
       })());
     } finally {
       await runner.close();
+    }
+
+    // Re-check from the page: only a real open finding, only with the token,
+    // one at a time.
+    const rechecked = [];
+    let releaseRe;
+    const heldRe = new Promise((r) => (releaseRe = r));
+    const re = dashboard.createServer(project, {
+      recheck: (rid) => {
+        rechecked.push(rid);
+        return heldRe.then(() => ({ id: rid, verdict: 'fixed', newProblems: [] }));
+      },
+    });
+    const rePort = await re.listen(0);
+    try {
+      const reHost = '127.0.0.1:' + rePort;
+      const rePage = await request(rePort, { path: '/', headers: { host: reHost } });
+      const reToken = (rePage.body.match(/name="kryptheon-token" content="([0-9a-f]+)"/) || [])[1];
+      const openId = dashboard.buildState(project).findings[0].id;
+      const ask = (rid, t) => request(rePort, { method: 'POST', path: '/api/recheck', headers: { host: reHost, 'content-type': 'application/json', 'x-kryptheon-token': t } }, JSON.stringify({ id: rid }));
+      const badShape = await ask('../../x', reToken);
+      const notOpen = await ask('deadbeef', reToken);
+      const noTok = await ask(openId, 'nope');
+      const firstRe = ask(openId, reToken);
+      await new Promise((r) => setTimeout(r, 150));
+      const busy = await ask(openId, reToken);
+      releaseRe();
+      const done = await firstRe;
+      check('re-check from the page: a real open finding, with the token, one at a time', (() => {
+        const p = [];
+        if (badShape.status !== 400) p.push('a malformed id answered ' + badShape.status);
+        if (notOpen.status !== 404) p.push('an id that is not open answered ' + notOpen.status);
+        if (noTok.status !== 403) p.push('no token answered ' + noTok.status);
+        if (busy.status !== 409) p.push('a second re-check during the first answered ' + busy.status);
+        if (done.status !== 200 || JSON.parse(done.body).verdict !== 'fixed') p.push('the re-check answered ' + done.status + ' ' + done.body);
+        if (JSON.stringify(rechecked) !== JSON.stringify([openId])) p.push('the re-check ran for ' + JSON.stringify(rechecked));
+        return p;
+      })());
+    } finally {
+      await re.close();
     }
 
     // And after every request above: still nothing of Kryptheon's in the project.

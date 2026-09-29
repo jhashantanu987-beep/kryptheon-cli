@@ -18,6 +18,7 @@
 //     config.json     which checks are switched on (the dashboard)
 //     snapshot.json   a hash of each project file, to tell what changed
 //     changes.jsonl   one line per change Kryptheon noticed, and what it ran
+//     fixes.jsonl     every re-check of a finding someone tried to fix, and its verdict
 //
 // Only tests/ - the recordings the person made - stays in the project.
 //
@@ -48,6 +49,7 @@ const FILES = {
   config: 'config.json',
   snapshot: 'snapshot.json',
   changes: 'changes.jsonl',
+  fixes: 'fixes.jsonl',
 };
 
 // What older versions wrote into the project, and where each one goes now.
@@ -134,6 +136,7 @@ function pathsIn(dir) {
     config: path.join(dir, FILES.config),
     snapshot: path.join(dir, FILES.snapshot),
     changes: path.join(dir, FILES.changes),
+    fixes: path.join(dir, FILES.fixes),
   };
 }
 

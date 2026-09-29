@@ -177,8 +177,24 @@ function compare(before, after) {
  * than by line number: a line added above a known finding moves it, and a
  * moved finding reported as new would teach a person to ignore this list.
  */
+//
+// The detail is part of what a finding is only for the code read, where it is
+// the expression itself. For a recorded flow or a database finding it is the
+// account of how it broke this time - "ended up somewhere different", "could
+// not be opened" - and a flow that is still broken in a new way is the same
+// finding, not a fixed one and a new one.
 function findingKey(f) {
-  return [f.check || '', f.where ? String(f.where).replace(/:\d+$/, '') : '', f.headline ? String(f.headline).replace(/:\d+\b/g, '') : '', f.detail || ''].join('|');
+  return [
+    f.check || '',
+    f.where ? String(f.where).replace(/:\d+$/, '') : '',
+    f.headline ? String(f.headline).replace(/:\d+\b/g, '') : '',
+    f.check === 'frontend' ? f.detail || '' : '',
+  ].join('|');
+}
+
+/** A short, stable name for a finding: what a person types to re-check it. */
+function findingId(f) {
+  return crypto.createHash('sha1').update(findingKey(f)).digest('hex').slice(0, 8);
 }
 
 function newFindings(before, after) {
@@ -200,6 +216,7 @@ module.exports = {
   compare: compare,
   dependencyChanges: dependencyChanges,
   findingKey: findingKey,
+  findingId: findingId,
   newFindings: newFindings,
   goneFindings: goneFindings,
 };

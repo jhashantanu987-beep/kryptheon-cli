@@ -86,6 +86,7 @@ function usage() {
   console.log('  npx kryptheon remove [name]  list the recordings, or remove one you no longer want');
   console.log('  npx kryptheon setup-ai       tell your AI assistant to check its work');
   console.log('  npx kryptheon verify         after a change: what changed, what broke, what got fixed');
+  console.log('  npx kryptheon recheck [id]   prove a fix: run the check again, and say FIXED or not');
   console.log('  npx kryptheon code           read your frontend code for text inserted as HTML');
   console.log('  npx kryptheon dashboard      open this project\'s dashboard (also: npx kryptheon, in a terminal)');
   console.log('');
@@ -2179,6 +2180,80 @@ function verify() {
   return openConfirmed.length || result.regressionExit === 1 ? 1 : 0;
 }
 
+// --- recheck ----------------------------------------------------------------
+//
+// The end of the fix loop: prove a fix. The finding's own check runs again,
+// and so does everything the changes since call for, so "fixed" never means
+// "the code changed", and a fix that broke something else says so.
+
+function replayForLoop() {
+  console.log('');
+  console.log('  Replaying your recordings...');
+  const r = spawnSync(process.execPath, [path.join(PACKAGE_DIR, 'bin', 'kryptheon.js'), 'check', '--quiet'], {
+    cwd: USER_DIR,
+    stdio: 'inherit',
+    env: process.env,
+  });
+  return r.status;
+}
+
+const VERDICT_WORDS = {
+  fixed: 'FIXED',
+  'still open': 'STILL OPEN',
+  'gone with its file': 'GONE WITH ITS FILE (not the same as fixed)',
+  'could not confirm': 'COULD NOT CONFIRM',
+};
+
+function recheckCommand(id) {
+  const here = project.inspectProject(USER_DIR);
+  if (!here.ok) {
+    for (const line of project.noProjectLines(here)) console.error(line);
+    return 1;
+  }
+  const opened = openStore();
+  if (!opened) return 1;
+  const looker = require(path.join(PACKAGE_DIR, 'kryptheon-look.js'));
+  const dash = require(path.join(PACKAGE_DIR, 'kryptheon-dashboard.js'));
+
+  if (!id) {
+    const open = dash.buildState(USER_DIR).findings;
+    console.log('');
+    if (!open.length) {
+      console.log('  Nothing is open. There is nothing to re-check.');
+    } else {
+      console.log('  Open findings - re-check one after fixing it:  npx kryptheon recheck <id>');
+      console.log('');
+      for (const f of open) console.log('    ' + f.id + '   ' + f.severity.padEnd(8) + f.status.padEnd(23) + f.where + '   ' + f.headline);
+    }
+    console.log('');
+    return 0;
+  }
+
+  const r = looker.recheck(USER_DIR, { frontend: () => readCodeAndSave(opened), regression: replayForLoop }, String(id).trim());
+  console.log('');
+  if (!r.found) {
+    console.error('  There is no open finding with the id ' + id + '.');
+    console.error('  npx kryptheon recheck, on its own, lists the ones that are open.');
+    console.error('');
+    return 1;
+  }
+  console.log('  RE-CHECK   ' + r.id + '   ' + r.where);
+  console.log('    ' + r.headline);
+  console.log('');
+  console.log('  VERDICT    ' + VERDICT_WORDS[r.verdict] + (r.why ? ' - ' + r.why : ''));
+  if (r.newProblems.length) {
+    console.log('');
+    console.log('  NEW PROBLEMS   ' + r.newProblems.length + ' appeared with this change:');
+    for (const p of r.newProblems) console.log('    ' + p.id + '   ' + p.severity + '   ' + p.status + '   ' + p.where + '   ' + p.headline);
+  } else if (r.verdict === 'fixed') {
+    console.log('');
+    console.log('  Nothing new broke that the checks could see.');
+  }
+  console.log('');
+  if (r.verdict === 'could not confirm') return 2;
+  return r.verdict === 'fixed' && !r.newProblems.length ? 0 : 1;
+}
+
 // --- dashboard --------------------------------------------------------------
 //
 // One page on this machine for everything Kryptheon knows about this project
@@ -2218,7 +2293,36 @@ async function dashboardCommand() {
   const opened = openStore();
   if (!opened) return 1;
   const dash = require(path.join(PACKAGE_DIR, 'kryptheon-dashboard.js'));
-  const app = dash.createServer(USER_DIR, { run: (id) => runFromDashboard(id, opened) });
+  const app = dash.createServer(USER_DIR, {
+    run: (id) => runFromDashboard(id, opened),
+    // The same `recheck` a person types, in its own process, so the page stays
+    // answerable while a flow is replayed. Its verdict is read from the store.
+    recheck: (id) => new Promise((resolve) => {
+      // Only a verdict written by this re-check counts: an older one for the
+      // same finding, read after a child that failed early, would be a stale
+      // answer shown as a fresh one.
+      const startedAt = new Date().toISOString();
+      const child = spawn(process.execPath, [path.join(PACKAGE_DIR, 'bin', 'kryptheon.js'), 'recheck', id], {
+        cwd: USER_DIR,
+        stdio: 'ignore',
+        env: process.env,
+      });
+      child.on('error', (err) => resolve({ ok: false, why: err.message }));
+      child.on('close', () => {
+        let last = null;
+        try {
+          const lines = fs.readFileSync(opened.fixes, 'utf8').split(String.fromCharCode(10)).filter(Boolean);
+          for (let i = lines.length - 1; i >= 0 && !last; i--) {
+            const a = JSON.parse(lines[i]);
+            if (a.id === id && a.at >= startedAt) last = a;
+          }
+        } catch (err) {
+          last = null;
+        }
+        resolve(last || { ok: false, why: 'the re-check did not record a verdict' });
+      });
+    }),
+  });
   let port;
   try {
     port = await app.listen(DASHBOARD_PORT);
@@ -2518,6 +2622,8 @@ async function main() {
       return finishWith(codeRead());
     case 'verify':
       return finishWith(verify());
+    case 'recheck':
+      return finishWith(recheckCommand(rest[0]));
     case '-v':
     case '--version':
     case 'version':

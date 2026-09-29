@@ -38,8 +38,11 @@ function look(root, runners, options) {
   const available = new Set(dash.CHECKS.filter((c) => c.available).map((c) => c.id));
 
   // On a first look, every check that can run, so the next look has
-  // something to compare against.
-  const wanted = diff.first ? ['frontend', 'regression', 'data'] : diff.checks;
+  // something to compare against. `force` adds checks that must run whatever
+  // changed - a re-check has to run the check that found the problem, even
+  // when the fix was made somewhere that check would not otherwise cover.
+  const wanted = (diff.first ? ['frontend', 'regression', 'data'] : diff.checks).slice();
+  for (const id of opts.force || []) if (!wanted.includes(id)) wanted.push(id);
   const plan = wanted.map((id) => {
     if (!available.has(id)) return { id: id, state: 'not available yet' };
     if (!enabled[id]) return { id: id, state: 'switched off in the dashboard' };
@@ -187,4 +190,70 @@ function startWatch(root, runners, options) {
   };
 }
 
-module.exports = { look: look, pending: pending, startWatch: startWatch };
+// What a broken flow says when the app itself did not answer - which is not
+// evidence either way about the fix.
+const APP_DID_NOT_ANSWER = /could not be opened|took too long to load|net::ERR|ECONNREFUSED/i;
+
+/**
+ * The second half of the loop: someone says a finding is fixed; prove it.
+ *
+ * The check that found it is run again - always, whatever else changed - and
+ * so is every check the changes since the last look call for, so a fix that
+ * breaks something else is caught in the same step. The verdict:
+ *
+ *   fixed               the check ran, and the finding is not there
+ *   still open          the check ran, and the finding is still there
+ *   gone with its file  the file it pointed at was deleted - not the same as fixed
+ *   could not confirm   the check did not run, or the app did not answer
+ *
+ * A fix is never assumed from a changed file. Every attempt is kept.
+ */
+function recheck(root, runners, id, options) {
+  const paths = store.pathsFor(root);
+  const target = dash.buildState(root).findings.find((f) => f.id === id);
+  if (!target) return { found: false };
+
+  const result = look(root, runners, { by: 'recheck', force: [target.check], replay: true });
+  const own = result.plan.find((s) => s.id === target.check);
+  const still = result.after.findings.find((f) => f.id === id);
+  let verdict;
+  let why = '';
+  if (!own || !/^ran/.test(own.state)) {
+    verdict = 'could not confirm';
+    why = own ? own.state : 'the check that found it did not run';
+  } else if (still && target.check === 'regression' && APP_DID_NOT_ANSWER.test(still.detail || '')) {
+    verdict = 'could not confirm';
+    why = 'your app did not answer while the flow was replayed - start it and re-check';
+  } else if (still) {
+    verdict = 'still open';
+    why = still.detail || '';
+  } else if (result.removed.some((f) => f.id === id)) {
+    verdict = 'gone with its file';
+    why = 'the file it pointed at was deleted, which is not the same as fixing it';
+  } else {
+    verdict = 'fixed';
+  }
+  // Problems that appeared with this fix. The finding itself is never one of
+  // them: it was there before, so it cannot be new.
+  const newProblems = result.fresh.map((f) => ({
+    id: f.id, check: f.check, severity: f.severity, status: f.status, where: f.where, headline: f.headline,
+  }));
+  const attempt = {
+    id: id,
+    at: new Date().toISOString(),
+    check: target.check,
+    where: target.where,
+    headline: target.headline,
+    verdict: verdict,
+    why: why,
+    newProblems: newProblems,
+  };
+  try {
+    fs.appendFileSync(paths.fixes, JSON.stringify(attempt) + '\n', 'utf8');
+  } catch (err) {
+    attempt.saveError = err.message;
+  }
+  return Object.assign({ found: true, target: target, look: result }, attempt);
+}
+
+module.exports = { look: look, pending: pending, startWatch: startWatch, recheck: recheck };

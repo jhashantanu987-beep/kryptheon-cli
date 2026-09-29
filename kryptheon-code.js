@@ -131,8 +131,16 @@ function calleeName(node) {
  *   'error'   - an error's message, which often carries text a server sent
  *   'unknown' - anything else: it may be fine, the code alone cannot say
  */
+// How far one value is followed back before giving up and calling it unknown.
+// It only exists to stop a loop - a function that returns itself, a name that
+// feeds another. It was 6, which a constant-only lookup (a template, a call,
+// its return, a map of maps) used up before reaching the strings at the
+// bottom, so a harmless label came back "unknown". Giving up always errs
+// towards reporting, never towards silence.
+const MAX_DEPTH = 12;
+
 function classify(node, scope, code, depth, aliases) {
-  if (!node || depth > 6) return 'unknown';
+  if (!node || depth > MAX_DEPTH) return 'unknown';
   const again = (n) => classify(n, scope, code, depth + 1, aliases);
   switch (node.type) {
     case 'StringLiteral':
@@ -156,6 +164,7 @@ function classify(node, scope, code, depth, aliases) {
     case 'OptionalCallExpression': {
       const name = calleeName(node.callee);
       if (MAKES_SAFE.test(name)) return 'safe';
+      if (readsResponseBody(node)) return 'network';
       if (NUMERIC_CALLS.test(name)) return 'safe';
       if (node.callee.type === 'MemberExpression' && node.callee.object && node.callee.object.name === 'Math') return 'safe';
       // items.map(i => `<li>${i.name}</li>`).join('') - judge what map builds.
@@ -169,6 +178,15 @@ function classify(node, scope, code, depth, aliases) {
         if (item) inner[item] = listOrigin;
         return classify(returnedBy(fn), scope, code, depth + 1, inner);
       }
+      // A function of this file's own: as dangerous as what it returns. One
+      // that only ever returns constants - a lookup of labels, icons and
+      // colours - cannot carry anything in; one that returns a parameter
+      // stays unknown, because its parameters are.
+      const local = node.callee.type === 'Identifier' ? localFunction(node.callee.name, scope) : null;
+      if (local) {
+        const returns = returnsOf(local);
+        if (returns.length) return worst(returns.map((r) => classify(r.node, r.scope, code, depth + 1, aliases)));
+      }
       // String methods pass through whatever they were called on.
       if (/^(trim|toUpperCase|toLowerCase|slice|substring|substr|replace|replaceAll|padStart|padEnd|concat|toString|join)$/.test(name) &&
           node.callee.type === 'MemberExpression') {
@@ -176,11 +194,25 @@ function classify(node, scope, code, depth, aliases) {
       }
       return 'unknown';
     }
+    case 'ObjectExpression':
+      // Only as dangerous as what is in it. A spread brings in whatever it spreads.
+      return worst(node.properties.map((p) => (p.type === 'SpreadElement' ? again(p.argument) : p.value && again(p.value))));
+    case 'ArrayExpression':
+      return worst(node.elements.map((e) => (e ? again(e.type === 'SpreadElement' ? e.argument : e) : 'safe')));
     case 'MemberExpression':
     case 'OptionalMemberExpression': {
       const prop = node.property && !node.computed ? node.property.name : '';
+      // The page's own markup, read back: button.innerHTML saved and put back
+      // adds nothing that was not already there. textContent is not this - it
+      // is text, and a "<" in it becomes a tag when written as HTML.
+      if (prop === 'innerHTML' || prop === 'outerHTML') return 'safe';
       if (NUMERIC_PROPS.test(prop || '')) return 'safe';
       if (prop === 'message' && isCatchParam(node.object, scope)) return 'error';
+      // labels().title - a property of what a call returns is judged by the
+      // call; (await res.json()).name by the body it was read from.
+      let base = node.object;
+      while (base && /MemberExpression$/.test(base.type)) base = base.object;
+      if (base && (/CallExpression$/.test(base.type) || base.type === 'AwaitExpression')) return again(base);
       return fromBinding(rootIdentifier(node), scope, code, depth, aliases);
     }
     case 'Identifier':
@@ -202,6 +234,34 @@ function returnedBy(fn) {
   if (fn.body.type !== 'BlockStatement') return fn.body;
   const ret = fn.body.body.find((s) => s.type === 'ReturnStatement');
   return ret ? ret.argument : null;
+}
+
+/** The path of a function this file declares under `name`, or null. */
+function localFunction(name, scope) {
+  const binding = scope && scope.getBinding(name);
+  if (!binding || !binding.path) return null;
+  const p = binding.path;
+  if (p.node.type === 'FunctionDeclaration') return p;
+  if (p.node.type === 'VariableDeclarator' && p.node.init && /Function/.test(p.node.init.type) &&
+      !(binding.constantViolations && binding.constantViolations.length)) {
+    return p.get('init');
+  }
+  return null;
+}
+
+/** Every value a function returns, with the scope to judge it in; nested functions excluded. */
+function returnsOf(fnPath) {
+  if (fnPath.node.body.type !== 'BlockStatement') return [{ node: fnPath.node.body, scope: fnPath.scope }];
+  const found = [];
+  fnPath.traverse({
+    Function(p) {
+      p.skip();
+    },
+    ReturnStatement(p) {
+      if (p.node.argument) found.push({ node: p.node.argument, scope: p.scope });
+    },
+  });
+  return found;
 }
 
 function rootIdentifier(node) {

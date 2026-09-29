@@ -73,6 +73,34 @@ const APP = {
     'async function two() { const r2 = await fetch("/y"); const d2 = await r2.json(); put(panel, "<b>ok</b>"); put(panel, `<i>${d2.title}</i>`); }', // 17
     'async function three() { const r3 = await fetch("/z"); const d3 = await r3.json().catch(() => ({})); note.innerHTML = `${d3.msg}`; }', // 18
   ].join('\n'),
+  // Precision: things that look dynamic but cannot carry new markup, next to
+  // look-alikes that can and must still be reported.
+  'src/ui.js': [
+    'function saving(button) {',
+    '  const original = button.innerHTML;',
+    '  button.innerHTML = "Saving...";',                                          // 3 safe: literal
+    '  button.innerHTML = original;',                                             // 4 safe: the page's own HTML put back
+    '}',
+    'function badge(kind) {',
+    '  const map = { ok: { label: "Done", color: "green" }, bad: { label: "Failed", color: "red" } };',
+    '  return map[kind] || map.ok;',
+    '}',
+    'function describeUser(u) { return { name: u.name, since: 2020 }; }',
+    'async function paint(kind) {',
+    '  const b = badge(kind);',
+    '  tag.innerHTML = `<span style="color:${b.color}">${b.label}</span>`;',       // 13 safe: only constants
+    '  const me = await (await fetch("/me")).json();',
+    '  const d = describeUser(me);',
+    '  who.innerHTML = `<b>${d.name}</b>`;',                                      // 16 reported: carries a parameter
+    '  const typed = input.textContent;',
+    '  echo.innerHTML = typed;',                                                  // 18 reported: text, not HTML
+    '}',
+    'function loop(v) { return loop(v); }',
+    'function spin() { ring.innerHTML = loop(1); }',                              // 21 reported, and must not hang
+    'function labels() { const fmt = function (x) { return x.name; }; return { title: "Orders", count: 3 }; }',
+    'function head() { title.innerHTML = `<h1>${labels().title}</h1>`; }',        // 23 safe: an inner function is not what it returns
+    'async function inline() { box.innerHTML = (await (await fetch("/x")).json()).name; }', // 24 network, read in place
+  ].join('\n'),
   'src/Card.jsx': [
     'export function Card({ body }) {',
     '  return <div dangerouslySetInnerHTML={{ __html: body }} />;',              // 2 unknown
@@ -208,8 +236,28 @@ check('the fix for a helper call says to escape at the call, not to change the h
   return p;
 })());
 
+check("precision: the page's own HTML and constant-only helpers are not reported", (() => {
+  const p = [];
+  for (const line of [3, 4, 13, 23]) if (at('src/ui.js', line)) p.push('ui.js:' + line + ' was reported: ' + at('src/ui.js', line).expression);
+  return p;
+})());
+
+check('precision does not become blindness: a helper passing a parameter through, and text read back as HTML, are still reported', (() => {
+  const p = [];
+  if (!at('src/ui.js', 16)) p.push("ui.js:16 (describeUser returns the user's name) was not reported");
+  if (!at('src/ui.js', 18)) p.push('ui.js:18 (textContent inserted as HTML) was not reported');
+  const looped = at('src/ui.js', 21);
+  if (!looped) p.push('ui.js:21 (a function that only returns itself) was not reported');
+  else if (looped.origin !== 'unknown') p.push('ui.js:21 origin ' + looped.origin);
+  const inline = at('src/ui.js', 24);
+  if (!inline) p.push('ui.js:24 (a response body read in place) was not reported');
+  else if (inline.origin !== 'network') p.push('ui.js:24 origin ' + inline.origin + ', expected network');
+  return p;
+})());
+
 check('exactly the expected findings, no more', (() => {
   const want = [
+    'src/ui.js:16', 'src/ui.js:18', 'src/ui.js:21', 'src/ui.js:24',
     'src/status.js:9', 'src/status.js:12', 'src/status.js:15', 'src/status.js:17', 'src/status.js:18',
     'public/page.html:8', 'src/Card.jsx:2', 'src/Note.vue:1',
     'src/list.js:15', 'src/list.js:17', 'src/list.js:21', 'src/list.js:18', 'src/list.js:19', 'src/list.js:4', 'src/list.js:9',

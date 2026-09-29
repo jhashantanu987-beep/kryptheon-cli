@@ -149,10 +149,10 @@ function classify(node, scope, code, depth, aliases) {
     case 'NullLiteral':
       return 'safe';
     case 'TemplateLiteral':
-      return worst(node.expressions.map((e) => again(e)));
+      return worst(judgedParts(node, scope, code).map((e) => again(e)));
     case 'BinaryExpression':
       if (node.operator !== '+') return 'safe'; // - * / % comparisons: never text
-      return worst([again(node.left), again(node.right)]);
+      return worst(judgedParts(node, scope, code).map((e) => again(e)));
     case 'UnaryExpression':
     case 'UpdateExpression':
       return 'safe';
@@ -168,16 +168,16 @@ function classify(node, scope, code, depth, aliases) {
       if (NUMERIC_CALLS.test(name)) return 'safe';
       if (node.callee.type === 'MemberExpression' && node.callee.object && node.callee.object.name === 'Math') return 'safe';
       // items.map(i => `<li>${i.name}</li>`).join('') - judge what map builds.
-      if (name === 'join' && node.callee.object && /CallExpression$/.test(node.callee.object.type) &&
-          calleeName(node.callee.object.callee) === 'map') {
-        const fn = node.callee.object.arguments[0];
-        // The callback's item is whatever the array it walks holds.
-        const listOrigin = again(node.callee.object.callee.object);
-        const item = fn && fn.params && fn.params[0] && fn.params[0].type === 'Identifier' ? fn.params[0].name : null;
-        const inner = Object.assign({}, aliases || {});
-        if (item) inner[item] = listOrigin;
-        return classify(returnedBy(fn), scope, code, depth + 1, inner);
+      const mapped = mapCallback(node, scope, code, depth, aliases);
+      if (mapped) {
+        return mapped.returns.length
+          ? worst(mapped.returns.map((r) => classify(r.node, r.scope, code, depth + 1, mapped.inner)))
+          : 'unknown';
       }
+      // An escaping helper of this file's own, known by what it does. Inside a
+      // template, one that leaves quotes alone does not protect a value that
+      // lands in an attribute - the template judges that case itself.
+      if (escaperOf(node, scope, code)) return 'safe';
       // A function of this file's own: as dangerous as what it returns. One
       // that only ever returns constants - a lookup of labels, icons and
       // colours - cannot carry anything in; one that returns a parameter
@@ -264,6 +264,154 @@ function returnsOf(fnPath) {
   return found;
 }
 
+// Every function in the piece being read, by node, so a callback handed to
+// map() can be judged in its own scope - where its own `const color = ...`
+// lives - instead of the caller's, where that name means nothing.
+let FN_PATHS = new WeakMap();
+
+/**
+ * list.map(cb).join(''): the callback's returns, each with its own scope, and
+ * what the callback's names stand for - the item is whatever the list holds,
+ * the index is a number. Null when node is not that shape.
+ */
+function mapCallback(node, scope, code, depth, aliases) {
+  if (calleeName(node.callee) !== 'join' || !node.callee.object || !/CallExpression$/.test(node.callee.object.type) ||
+      calleeName(node.callee.object.callee) !== 'map') {
+    return null;
+  }
+  const mapCall = node.callee.object;
+  const fn = mapCall.arguments[0];
+  const listOrigin = classify(mapCall.callee.object, scope, code, depth + 1, aliases);
+  const inner = Object.assign({}, aliases || {});
+  const params = (fn && fn.params) || [];
+  if (params[0] && params[0].type === 'Identifier') inner[params[0].name] = listOrigin;
+  if (params[1] && params[1].type === 'Identifier') inner[params[1].name] = 'safe';
+  const fnPath = fn && FN_PATHS.get(fn);
+  const returns = fnPath
+    ? returnsOf(fnPath)
+    : (returnedBy(fn) ? [{ node: returnedBy(fn), scope: scope }] : []);
+  return { returns: returns, inner: inner };
+}
+
+/**
+ * Whether a call escapes HTML - by name for the well-known ones, and for a
+ * helper of this file's own, by what it does: every return is a replace()
+ * chain, its patterns cover & < and >, and it writes &amp; &lt; &gt;. The
+ * name decides nothing - `esc` and `clean3` count, and an "escape" that only
+ * handles "<", or escapes and then returns the original, does not.
+ * Returns { dq, sq }: whether " and ' are escaped too. Null when it does not escape.
+ */
+function escaperOf(call, scope, code) {
+  if (!call || !/CallExpression$/.test(call.type)) return null;
+  const name = calleeName(call.callee);
+  if (MAKES_SAFE.test(name)) return { dq: true, sq: true };
+  if (call.callee.type !== 'Identifier') return null;
+  const fnPath = localFunction(call.callee.name, scope);
+  if (!fnPath) return null;
+  const returns = returnsOf(fnPath);
+  if (!returns.length || !returns.every((r) => /CallExpression$/.test(r.node.type) &&
+      /^(replace|replaceAll)$/.test(calleeName(r.node.callee)))) {
+    return null;
+  }
+  let patterns = '';
+  const written = [];
+  fnPath.traverse({
+    RegExpLiteral(p) {
+      patterns += p.node.pattern;
+    },
+    StringLiteral(p) {
+      written.push(p.node.value);
+      const parent = p.parent;
+      if (parent && /CallExpression$/.test(parent.type) && parent.arguments[0] === p.node &&
+          /^(replace|replaceAll)$/.test(calleeName(parent.callee))) {
+        patterns += p.node.value;
+      }
+    },
+  });
+  const writes = (entity) => written.some((s) => s.indexOf(entity) !== -1);
+  if (!/&/.test(patterns) || !/</.test(patterns) || !/>/.test(patterns)) return null;
+  if (!writes('&amp;') || !writes('&lt;') || !writes('&gt;')) return null;
+  return {
+    dq: /"/.test(patterns) && (writes('&quot;') || writes('&#34;') || writes('&#x22;')),
+    sq: /'/.test(patterns) && (writes('&#39;') || writes('&#x27;') || writes('&apos;')),
+  };
+}
+
+/**
+ * The quote an HTML attribute value is open in at the end of this text: '"',
+ * "'", 'bare' for an unquoted one, '' when the text is not inside a tag at all.
+ * Only inside a tag - after a "<" that no ">" has closed - is an "=" an
+ * attribute; the "=" of "/go?next=" in a URL string is not one.
+ */
+function openAttribute(text) {
+  const lt = text.lastIndexOf('<');
+  if (lt === -1 || text.lastIndexOf('>') > lt) return '';
+  const tag = text.slice(lt);
+  const quoted = /=\s*(["'])[^"']*$/.exec(tag);
+  if (quoted) return quoted[1];
+  return /\s[^\s"'<>\/=]+\s*=\s*$/.test(tag) ? 'bare' : '';
+}
+
+/**
+ * The pieces of a template or a + concatenation to judge one by one. An
+ * escaped value is judged as its escaped input when the escaping is not
+ * enough for where it lands: inside a "..." attribute that needs " escaped,
+ * inside '...' that needs ' escaped, and an unquoted attribute is broken by a
+ * space no escaper touches.
+ */
+function judgedParts(node, scope, code) {
+  const pairs = [];
+  if (node.type === 'TemplateLiteral') {
+    // Everything written before this value, so an attribute opened in an
+    // earlier piece - `<a title="${a}" href="${b}"` - is still seen as open.
+    let before = '';
+    node.expressions.forEach((e, i) => {
+      before += node.quasis[i].value.raw;
+      pairs.push({ before: before, value: e });
+      before += 'x';
+    });
+  } else {
+    const text = (n) => (n.type === 'StringLiteral' ? n.value
+      : n.type === 'TemplateLiteral' ? n.quasis[n.quasis.length - 1].value.raw : '');
+    pairs.push({ before: '', value: node.left });
+    pairs.push({ before: text(node.left), value: node.right });
+  }
+  return pairs.map(({ before, value }) => {
+    const esc = escaperOf(value, scope, code);
+    if (!esc) return value;
+    const quote = openAttribute(before);
+    const enough = quote === '' || (quote === '"' && esc.dq) || (quote === "'" && esc.sq);
+    return enough ? { type: 'StringLiteral' } : (value.arguments[0] || value);
+  });
+}
+
+/**
+ * Which parts of a value make it unsafe, in the words of the code - so a fix
+ * prompt can say "only ${log.caller_number}" instead of quoting sixty lines of
+ * template and leaving the reader to find it. At most five, never repeated.
+ */
+function riskyParts(node, scope, code, aliases, out, depth) {
+  if (!node || out.length >= 5 || depth > MAX_DEPTH) return;
+  const origin = classify(node, scope, code, 0, aliases);
+  if (origin === 'safe') return;
+  const go = (n, s, a) => riskyParts(n, s || scope, code, a || aliases, out, depth + 1);
+  if (node.type === 'TemplateLiteral' || (node.type === 'BinaryExpression' && node.operator === '+')) {
+    judgedParts(node, scope, code).forEach((p) => go(p));
+    return;
+  }
+  if (node.type === 'ConditionalExpression') { go(node.consequent); go(node.alternate); return; }
+  if (node.type === 'LogicalExpression') { go(node.left); go(node.right); return; }
+  if (/CallExpression$/.test(node.type)) {
+    const mapped = mapCallback(node, scope, code, depth, aliases);
+    if (mapped && mapped.returns.length) {
+      mapped.returns.forEach((r) => go(r.node, r.scope, mapped.inner));
+      return;
+    }
+  }
+  const text = code.slice(node.start, node.end).replace(/\s+/g, ' ').slice(0, 80);
+  if (!out.some((p) => p.text === text)) out.push({ text: text, origin: origin });
+}
+
 function rootIdentifier(node) {
   let n = node;
   while (n && /MemberExpression$/.test(n.type)) n = n.object;
@@ -284,13 +432,50 @@ function fromBinding(id, scope, code, depth, aliases) {
   const binding = scope.getBinding(id.name);
   if (!binding) return 'unknown';
   if (binding.path && binding.path.type === 'CatchClause') return 'error';
+  if (binding.kind === 'param') return fromCalls(binding, code, depth);
   const init = binding.path && binding.path.node && binding.path.node.init;
   if (!init) return 'unknown';
   if (readsResponseBody(init)) return 'network';
   // Reassigned later: the first value says nothing reliable about the last.
   if (binding.constantViolations && binding.constantViolations.length) return 'unknown';
   // Destructured from a response body: const { name } = await res.json()
-  return classify(init, binding.path.scope, code, depth + 1);
+  // Aliases carry through: inside a map() callback, `const t = r.title` is as
+  // dangerous as the item r it was read from.
+  return classify(init, binding.path.scope, code, depth + 1, aliases);
+}
+
+/**
+ * A parameter is as dangerous as the worst thing any call passes it. Every
+ * use of the function has to be a call this file makes: one handed on as a
+ * value - a callback, an export, an event handler - is called from somewhere
+ * the code does not show, so its parameter stays unknown.
+ */
+function fromCalls(binding, code, depth) {
+  const fn = binding.path && binding.path.parentPath;
+  if (!fn || !/Function/.test(fn.node.type)) return 'unknown';
+  const index = fn.node.params.indexOf(binding.path.node);
+  if (index === -1) return 'unknown';
+  let name = fn.node.id && fn.node.id.name;
+  if (!name && fn.parentPath && fn.parentPath.node.type === 'VariableDeclarator' && fn.parentPath.node.id.type === 'Identifier') {
+    name = fn.parentPath.node.id.name;
+  }
+  const fnBinding = name && fn.parentPath && fn.parentPath.scope.getBinding(name);
+  if (!fnBinding || (fnBinding.constantViolations && fnBinding.constantViolations.length)) return 'unknown';
+  const refs = fnBinding.referencePaths || [];
+  if (!refs.length) return 'unknown';
+  const origins = [];
+  for (const ref of refs) {
+    const call = ref.parent;
+    if (!call || !/CallExpression$/.test(call.type) || call.callee !== ref.node) return 'unknown';
+    const arg = call.arguments[index];
+    if (!arg) {
+      origins.push('safe'); // not passed: undefined
+      continue;
+    }
+    if (call.arguments.slice(0, index + 1).some((a) => a.type === 'SpreadElement')) return 'unknown';
+    origins.push(classify(arg, ref.scope, code, depth + 1));
+  }
+  return worst(origins);
 }
 
 function readsResponseBody(node) {
@@ -342,6 +527,11 @@ function sinksIn(parser, code, file, lineOffset) {
   // each call actually hands it.
   const calls = new Map();
   const viaHelper = [];
+  const partsOf = (value, scope) => {
+    const out = [];
+    riskyParts(value, scope, code, undefined, out, 0);
+    return out;
+  };
   const add = (node, scope, sink, value) => {
     const param = paramOf(value, scope);
     if (param) {
@@ -350,9 +540,13 @@ function sinksIn(parser, code, file, lineOffset) {
     }
     const origin = classify(value, scope, code, 0);
     if (origin === 'safe') return;
-    found.push({ line: lineOf(node), sink: sink, expression: textOf(value), origin: origin });
+    found.push({ line: lineOf(node), sink: sink, expression: textOf(value), origin: origin, parts: partsOf(value, scope) });
   };
+  FN_PATHS = new WeakMap();
   parser.traverse(ast, {
+    Function(p) {
+      FN_PATHS.set(p.node, p);
+    },
     CallExpression: {
       exit(p) {
         if (p.node.callee.type !== 'Identifier') return;
@@ -411,6 +605,7 @@ function sinksIn(parser, code, file, lineOffset) {
         sink: h.sink,
         expression: textOf(arg),
         origin: origin,
+        parts: partsOf(arg, call.scope),
         via: { fn: h.param.fn, line: lineOf(h.node) },
       });
     }
@@ -518,18 +713,29 @@ function describe(f) {
         'HTML entities). If the HTML is meant to allow some formatting, pass it through a sanitizer ' +
         'such as DOMPurify first.',
     ];
+  // A long template is mostly harmless markup. Naming the part that decides it
+  // keeps the fix - and the AI tool doing it - to that part alone.
+  const parts = (f.parts || []).filter((p) => p.text && p.text !== f.expression);
+  const only = parts.length
+    ? [''].concat(
+      [(parts.length === 1 ? 'Only this part' : 'Only these parts') + ' of it can carry text from outside the page, ' +
+        'so only ' + (parts.length === 1 ? 'it needs' : 'they need') + ' changing:'],
+      parts.map((p) => '    ${' + p.text + '}'),
+    )
+    : [];
   const fixPrompt = [
     'My app may have a security problem - please check it rather than assume it.',
     '',
     where,
     '',
     '    ' + f.expression,
+  ].concat(only, [
     '',
     'The value is ' + ORIGIN_WORDS[f.origin] + '. If it can ever contain text a user or another ' +
       'account typed, a "<" in it becomes a real tag and can run script in this page with the ' +
       "signed-in person's session.",
     '',
-  ].concat(fix, [
+  ]).concat(fix, [
     '',
     'Keep the page looking the same, change only how this value is inserted, and look for the ' +
       'same pattern elsewhere in this file. Afterwards, open this page and check that ordinary ' +
@@ -546,6 +752,7 @@ function describe(f) {
     sink: f.sink,
     expression: f.expression,
     origin: f.origin,
+    parts: (f.parts || []).map((p) => ({ text: p.text, origin: p.origin })),
     via: f.via || null,
     headline: 'Text ' + (f.origin === 'unknown' ? 'of unknown origin' : ORIGIN_WORDS[f.origin].split(',')[0]) +
       ' is inserted as HTML in ' + f.file + ':' + f.line +

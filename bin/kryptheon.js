@@ -2053,6 +2053,8 @@ function codeRead() {
       console.log('  ' + f.severity + '   ' + f.file + ':' + f.line + '   (verification required)');
       console.log('    ' + f.headline);
       console.log('    ' + f.sink + ':  ' + f.expression);
+      const parts = (f.parts || []).filter((p) => p.text !== f.expression);
+      if (parts.length) console.log('    the risky part' + (parts.length === 1 ? ':  ' : 's:  ') + parts.map((p) => p.text).join(',  '));
     }
     const prompted = high.slice(0, CODE_PROMPTS_SHOWN);
     if (prompted.length) {

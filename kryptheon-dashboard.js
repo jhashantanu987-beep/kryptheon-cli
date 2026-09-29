@@ -127,6 +127,13 @@ function recentChanges(root) {
   };
 }
 
+/** "  -  the risky part: x" for a frontend finding that names one, else "". */
+function riskyPartsLine(f) {
+  const parts = (f.parts || []).filter((p) => p && p.text && p.text !== f.expression);
+  if (!parts.length) return '';
+  return '  -  the risky part' + (parts.length === 1 ? ': ' : 's: ') + parts.map((p) => p.text).join(', ');
+}
+
 /** When this flow last passed, from the run history, or null. */
 function lastPassOf(history, title) {
   for (let i = history.length - 1; i >= 0; i--) {
@@ -290,7 +297,9 @@ function buildState(root, env) {
         confidence: f.confidence,
         where: f.file + ':' + f.line,
         headline: f.headline,
-        detail: f.sink + ': ' + f.expression,
+        // The part of a long template that decides it, so the person reading
+        // it looks at one value instead of sixty lines of markup.
+        detail: f.sink + ': ' + f.expression + riskyPartsLine(f),
         fixPrompt: f.fixPrompt,
         when: code.checkedAt,
       });

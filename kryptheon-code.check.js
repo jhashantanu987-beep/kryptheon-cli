@@ -101,6 +101,38 @@ const APP = {
     'function head() { title.innerHTML = `<h1>${labels().title}</h1>`; }',        // 23 safe: an inner function is not what it returns
     'async function inline() { box.innerHTML = (await (await fetch("/x")).json()).name; }', // 24 network, read in place
   ].join('\n'),
+  // Precision inside map() callbacks and escaping helpers. Each quiet case has
+  // a look-alike next to it that must still be reported.
+  'src/precise.js': [
+    'async function paintRows() {',
+    '  const res = await fetch("/api/rows");',
+    '  const rows = await res.json();',
+    '  bars.innerHTML = rows.map((r) => { const color = r.ok ? "#1a1" : "#a11"; const h = Math.max(8, Math.round(r.n * 2)); return `<i style="color:${color};height:${h}px"></i>`; }).join("");', // 4 safe: locals are constants and numbers
+    '  nums.innerHTML = rows.map((r, i) => `<li data-i="${i}">#${i + 1}</li>`).join("");',   // 5 safe: the index
+    '  names.innerHTML = rows.map((r) => { const t = r.title; return `<li>${t}</li>`; }).join("");', // 6 network: a local carrying the item
+    '  const esc = (s) => String(s).replace(/[&<>"\']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", \'"\': "&quot;", "\'": "&#39;" }[c]));',
+    '  who.innerHTML = `<b title="${esc(rows[0].title)}">${esc(rows[0].name)}</b>`;',       // 8 safe: escapes by what it does, not by its name
+    '  function escText(t) { return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }',
+    '  plain.innerHTML = `<p>${escText(rows[0].note)}</p>`;',                                 // 10 safe: tags escaped, not inside an attribute
+    '  attr.innerHTML = `<a title="${escText(rows[0].note)}">x</a>`;',                       // 11 network: quotes left alone, inside an attribute
+    '  const half = (s) => String(s).replace(/</g, "&lt;");',
+    '  partial.innerHTML = `<p>${half(rows[0].note)}</p>`;',                                 // 13 reported: only < replaced
+    '  const same = (s) => { const out = s.replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/&/g, "&amp;"); return s; };',
+    '  fake.innerHTML = `<p>${same(rows[0].note)}</p>`;',                                     // 15 reported: escapes, then returns the original
+    '  multi.innerHTML = rows.map((r) => { if (r.flag) { return `<b>${r.secret}</b>`; } return ""; }).join("");', // 16 network: the risky return is not the first one
+    '  function goUrl(v) { return `/go?next=${encodeURIComponent(v)}`; }',
+    '  link.innerHTML = `<a href="${goUrl(rows[0].id)}">go</a>`;',                           // 18 safe: the "=" in a URL is not an attribute
+    '  bare.innerHTML = `<a title=${esc(rows[0].t)}>x</a>`;',                                // 19 network: an unquoted attribute is broken by a space
+    '  function paintGrad(color, id) { grad.innerHTML = `<stop id="${id}" stop-color="${color}"/>`; }', // 20 safe: every call passes constants
+    '  paintGrad("#f40", "a"); paintGrad("#0f0", "b");',
+    '  function paintName(name) { nm.innerHTML = `<b>${name}</b>`; }',                     // 22 network: one call passes a server value
+    '  paintName("x"); paintName(rows[0].name);',
+    '  function paintAny(v) { any.innerHTML = `<i>${v}</i>`; }',                           // 24 reported: handed on as a callback, its calls cannot be seen
+    '  [1, 2].forEach(paintAny);',
+    '  pair.innerHTML = `<a href="${goUrl(1)}" title="${escText(rows[0].t)}">x</a>`;',  // 26 network: the attribute opened in an earlier piece of the template
+    '  note2.innerHTML = `<p>Filter: tag="${escText(rows[0].tag)}"</p>`;',             // 27 safe: tag=" here is text between tags, not an attribute
+    '}',
+  ].join('\n'),
   'src/Card.jsx': [
     'export function Card({ body }) {',
     '  return <div dangerouslySetInnerHTML={{ __html: body }} />;',              // 2 unknown
@@ -255,8 +287,80 @@ check('precision does not become blindness: a helper passing a parameter through
   return p;
 })());
 
+check('precision in map() callbacks: locals that are constants or numbers, and the index, are not reported', (() => {
+  const p = [];
+  for (const line of [4, 5]) {
+    const f = at('src/precise.js', line);
+    if (f) p.push('precise.js:' + line + ' was reported (' + f.origin + '): ' + f.expression.slice(0, 90));
+  }
+  return p;
+})());
+
+check('...but a local that carries the item, or a later return that does, is still found as network', (() => {
+  const p = [];
+  for (const line of [6, 16]) {
+    const f = at('src/precise.js', line);
+    if (!f) p.push('precise.js:' + line + ' was not reported');
+    else if (f.origin !== 'network') p.push('precise.js:' + line + ' origin ' + f.origin + ', expected network');
+  }
+  return p;
+})());
+
+check('an escaping helper is known by what it does, whatever it is called', (() => {
+  const p = [];
+  for (const line of [8, 10, 18, 27]) {
+    const f = at('src/precise.js', line);
+    if (f) p.push('precise.js:' + line + ' was reported (' + f.origin + '): ' + f.expression.slice(0, 90));
+  }
+  return p;
+})());
+
+check('...and one that does not really escape, or not enough for where the value lands, is still reported', (() => {
+  const p = [];
+  const attr = at('src/precise.js', 11);
+  if (!attr) p.push('precise.js:11 (tags escaped, quotes not, value inside an attribute) was not reported');
+  else if (attr.origin !== 'network') p.push('precise.js:11 origin ' + attr.origin + ', expected network');
+  if (!at('src/precise.js', 13)) p.push('precise.js:13 (only < replaced) was not reported');
+  if (!at('src/precise.js', 15)) p.push('precise.js:15 (escapes, then returns the original) was not reported');
+  const pair = at('src/precise.js', 26);
+  if (!pair) p.push('precise.js:26 (quotes not escaped, attribute opened earlier in the template) was not reported');
+  else if (pair.origin !== 'network') p.push('precise.js:26 origin ' + pair.origin + ', expected network');
+  const bare = at('src/precise.js', 19);
+  if (!bare) p.push('precise.js:19 (escaped, but in an unquoted attribute) was not reported');
+  else if (bare.origin !== 'network') p.push('precise.js:19 origin ' + bare.origin + ', expected network');
+  return p;
+})());
+
+check('a parameter is judged by what every call passes it: constants everywhere is quiet, one server value is not', (() => {
+  const p = [];
+  const grad = at('src/precise.js', 20);
+  if (grad) p.push('precise.js:20 (every call passes constants) was reported: ' + grad.origin);
+  const name = at('src/precise.js', 22);
+  if (!name) p.push('precise.js:22 (one call passes a server value) was not reported');
+  else if (name.origin !== 'network') p.push('precise.js:22 origin ' + name.origin + ', expected network');
+  const any = at('src/precise.js', 24);
+  if (!any) p.push('precise.js:24 (a function passed on as a callback) was not reported');
+  else if (any.origin !== 'unknown') p.push('precise.js:24 origin ' + any.origin + ', expected unknown');
+  return p;
+})());
+
+check('a finding names the part of a long value that makes it risky, so the fix touches only that', (() => {
+  const p = [];
+  const f = at('src/precise.js', 6);
+  if (!f) return ['precise.js:6 not found'];
+  const parts = (f.parts || []).map((x) => x.text);
+  if (!parts.includes('t')) p.push('parts do not name t: ' + JSON.stringify(f.parts));
+  if (!/Only this part/.test(f.fixPrompt) || f.fixPrompt.indexOf('${t}') === -1) p.push('the fix prompt does not name the part: ' + f.fixPrompt.slice(0, 400));
+  const multi = at('src/precise.js', 16);
+  if (multi && !(multi.parts || []).some((x) => x.text === 'r.secret')) p.push('line 16 parts do not name r.secret: ' + JSON.stringify(multi.parts));
+  const whole = at('src/list.js', 4);
+  if (whole && !(whole.parts || []).some((x) => x.text === 'data.shopName')) p.push('list.js:4 parts do not name data.shopName: ' + JSON.stringify(whole.parts));
+  return p;
+})());
+
 check('exactly the expected findings, no more', (() => {
   const want = [
+    'src/precise.js:6', 'src/precise.js:11', 'src/precise.js:13', 'src/precise.js:15', 'src/precise.js:16', 'src/precise.js:19', 'src/precise.js:22', 'src/precise.js:24', 'src/precise.js:26',
     'src/ui.js:16', 'src/ui.js:18', 'src/ui.js:21', 'src/ui.js:24',
     'src/status.js:9', 'src/status.js:12', 'src/status.js:15', 'src/status.js:17', 'src/status.js:18',
     'public/page.html:8', 'src/Card.jsx:2', 'src/Note.vue:1',

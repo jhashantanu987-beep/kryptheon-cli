@@ -34,7 +34,7 @@ fs.writeFileSync(kept.history, [
 ].join('\n') + '\n', 'utf8');
 fs.writeFileSync(kept.codeFindings, JSON.stringify({
   checkedAt: '2026-09-29T11:00:00.000Z',
-  findings: [code.describe({ file: 'src/cart.js', line: 12, sink: 'innerHTML', expression: '`<b>${d.name}</b>`', origin: 'network' })],
+  findings: [code.describe({ file: 'src/cart.js', line: 12, sink: 'innerHTML', expression: '`<b>${d.name}</b>`', origin: 'network', parts: [{ text: 'd.name', origin: 'network' }] })],
 }), 'utf8');
 fs.writeFileSync(kept.nightLast, JSON.stringify({
   findings: [{ severity: 'CRITICAL', status: 'confirmed', table: 'orders', kind: 'exposed', headline: 'Your orders table can be read by anyone.', body: 'I read 2 rows.', fixPrompt: 'Fix the orders rule.' }],
@@ -82,6 +82,12 @@ check('findings from all three checks arrive, each with severity, status, eviden
     p.push('a HIGH that needs verification is listed above a HIGH that was confirmed: ' + JSON.stringify(order));
   }
   return p;
+})());
+
+check('a frontend finding says which part of the value is the risky one', (() => {
+  const f = state.findings.find((x) => x.check === 'frontend');
+  if (!f) return ['no frontend finding'];
+  return /the risky part: d.name/.test(f.detail) ? [] : ['detail does not name the part: ' + f.detail];
 })());
 
 check('a broken recording gets a fix prompt built only from what the run recorded', (() => {

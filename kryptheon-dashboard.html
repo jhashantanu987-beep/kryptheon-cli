@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="kryptheon-token" content="%%TOKEN%%">
+<title>Kryptheon</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --ink: #1c1c1a; --muted: #6b6b66; --line: #e4e4df;
+    --crit: #b42318; --high: #c4320a; --med: #b54708; --low: #475467;
+    --ok: #067647; --off: #98a2b3; --accent: #1f4fd6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --panel: #1d1d1b; --ink: #ecece8; --muted: #a3a39c; --line: #2e2e2b;
+      --crit: #f97066; --high: #fb6514; --med: #fdb022; --low: #98a2b3;
+      --ok: #47cd89; --off: #667085; --accent: #7a9bff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 20px 24px 8px; }
+  header h1 { margin: 0; font-size: 20px; }
+  header .sub { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  main { display: grid; gap: 16px; padding: 12px 24px 40px; grid-template-columns: minmax(0, 1fr) 360px; }
+  @media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); padding: 12px 16px 32px; } header { padding: 16px 16px 4px; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+  .stat .n { font-size: 24px; font-weight: 700; }
+  .stat .l { color: var(--muted); font-size: 12px; }
+  .finding { border-top: 1px solid var(--line); padding: 12px 0; }
+  .finding:first-child { border-top: 0; padding-top: 0; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .tag { font-size: 11px; font-weight: 600; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; color: var(--muted); }
+  .sev-CRITICAL, .sev-HIGHCRITICAL { color: var(--crit); border-color: var(--crit); }
+  .sev-HIGH { color: var(--high); border-color: var(--high); }
+  .sev-MEDIUM { color: var(--med); border-color: var(--med); }
+  .sev-LOW { color: var(--low); border-color: var(--low); }
+  .headline { font-weight: 600; }
+  .where { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .detail { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; margin-top: 4px; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, Consolas, monospace; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0 0; }
+  button { font: inherit; font-size: 12px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  .check { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--line); }
+  .check:first-child { border-top: 0; }
+  .check .name { font-weight: 600; font-size: 14px; }
+  .check .state { font-size: 12px; color: var(--muted); }
+  .check.na .name { color: var(--off); }
+  .switch { margin-top: 3px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { text-align: left; padding: 6px 4px; border-top: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; border-top: 0; }
+  .empty { color: var(--muted); font-size: 13px; }
+  .notice { font-size: 13px; color: var(--muted); }
+  .error { color: var(--crit); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Kryptheon</h1>
+  <div class="sub" id="where">Loading...</div>
+</header>
+<main>
+  <div style="display:grid; gap:16px; min-width:0">
+    <section>
+      <h2>Status</h2>
+      <div class="summary" id="summary"></div>
+      <p class="notice" id="verification"></p>
+    </section>
+    <section>
+      <h2>Findings</h2>
+      <div id="findings"></div>
+    </section>
+    <section>
+      <h2>Runs</h2>
+      <div id="runs"></div>
+    </section>
+    <section>
+      <h2>Recent changes</h2>
+      <div id="changes"></div>
+    </section>
+  </div>
+  <div style="display:grid; gap:16px; align-content:start; min-width:0">
+    <section>
+      <h2>Checks</h2>
+      <div id="checks"></div>
+      <p class="error" id="checkError" hidden></p>
+    </section>
+    <section>
+      <h2>Where this lives</h2>
+      <p class="notice" id="storeNote"></p>
+    </section>
+  </div>
+</main>
+<script src="/dashboard.js"></script>
+</body>
+</html>

@@ -161,6 +161,36 @@ wanted, and one new name of the same kind. A button that is gone with nothing
 in its place, or a rename next to other new buttons, fails as it always did.
 Checks you added with the toolbar are never redirected.
 
+## Dashboard
+
+```
+npx kryptheon
+```
+
+In a terminal, with no command, this opens a page on your own machine
+(`http://127.0.0.1:4789/`) for this project: what is broken, what needs a
+look, every run, recent changes, and switches for each check. `Run now`
+replays your recordings or reads your code from the page. It is only
+reachable from this machine; press Ctrl+C to stop it. From a script, use
+`npx kryptheon dashboard`.
+
+Checks that are not built yet are listed as "not available" - never as
+passed.
+
+## Reading your code
+
+```
+npx kryptheon code
+```
+
+Reads your frontend code for values put into the page as HTML - `innerHTML`,
+`insertAdjacentHTML`, `document.write`, React's `dangerouslySetInnerHTML`,
+Vue's `v-html`. If such a value can hold text someone typed, a `<` in it can
+run script with the signed-in person's session. Nothing is run; every result
+is "verification required", ranked HIGH when the value comes from a server
+response or an error message, MEDIUM when the code alone cannot say. The fix
+prompt for each one names the file, line and value.
+
 ## What goes where
 
 Only your recordings go in your project, in `tests/`. Everything Kryptheon

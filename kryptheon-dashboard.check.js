@@ -1,0 +1,323 @@
+// Checks the local dashboard: what it shows, what it refuses, and who can
+// reach it. Run with:  node kryptheon-dashboard.check.js
+//
+// A throwaway project and a scratch store (KRYPTHEON_HOME), so nothing here
+// touches the real ~/.kryptheon or a real project.
+
+process.env.KRYPTHEON_HOME = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'kryptheon-home-'));
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const store = require('./kryptheon-store.js');
+const dashboard = require('./kryptheon-dashboard.js');
+const code = require('./kryptheon-code.js');
+
+const results = [];
+const check = (name, problems) => results.push({ name, problems });
+
+// A project with one recording, and a store holding one run of each kind.
+const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kryptheon-dash-project-'));
+fs.writeFileSync(path.join(project, 'package.json'), '{"name":"shop","private":true}\n', 'utf8');
+fs.mkdirSync(path.join(project, 'tests'));
+fs.writeFileSync(path.join(project, 'tests', 'checkout.spec.js'), '// a recording\n', 'utf8');
+const before = fs.readdirSync(project).sort().join(',');
+
+const kept = store.open(project);
+fs.writeFileSync(kept.history, [
+  JSON.stringify({ runAt: '2026-09-28T10:00:00.000Z', status: 'passed', passed: 1, failed: 0, tests: [{ title: 'Checkout', status: 'passed' }] }),
+  JSON.stringify({ runAt: '2026-09-29T10:00:00.000Z', status: 'failed', passed: 0, failed: 1, tests: [{
+    title: 'Checkout', status: 'failed', specFile: 'tests\\checkout.spec.js',
+    failure: { line: 7, file: 'tests\\checkout.spec.js', plainLanguage: 'Could not find the Pay button on the page.' },
+  }] }),
+].join('\n') + '\n', 'utf8');
+fs.writeFileSync(kept.codeFindings, JSON.stringify({
+  checkedAt: '2026-09-29T11:00:00.000Z',
+  findings: [code.describe({ file: 'src/cart.js', line: 12, sink: 'innerHTML', expression: '`<b>${d.name}</b>`', origin: 'network' })],
+}), 'utf8');
+fs.writeFileSync(kept.nightLast, JSON.stringify({
+  findings: [{ severity: 'CRITICAL', status: 'confirmed', table: 'orders', kind: 'exposed', headline: 'Your orders table can be read by anyone.', body: 'I read 2 rows.', fixPrompt: 'Fix the orders rule.' }],
+}), 'utf8');
+
+const state = dashboard.buildState(project);
+
+check('every check the person asked for is listed, by name', (() => {
+  const want = ['regression', 'frontend', 'data', 'build', 'backend', 'api', 'integration', 'dependency', 'runtime',
+    'performance', 'edge', 'reliability', 'synthetic', 'eligibility'];
+  const got = state.checks.map((c) => c.id);
+  return JSON.stringify(got) === JSON.stringify(want) ? [] : ['got ' + JSON.stringify(got)];
+})());
+
+check('a check that is not built says "not available" - never passed, never on', (() => {
+  const p = [];
+  for (const c of state.checks.filter((x) => !x.available)) {
+    if (c.state !== 'not available') p.push(c.id + ' says "' + c.state + '"');
+    if (c.enabled) p.push(c.id + ' is switched on');
+  }
+  if (!state.checks.some((x) => !x.available)) p.push('no check is marked not available at all');
+  return p;
+})());
+
+check('findings from all three checks arrive, each with severity, status, evidence and confidence', (() => {
+  const p = [];
+  const by = (id) => state.findings.find((f) => f.check === id);
+  for (const id of ['regression', 'frontend', 'data']) {
+    const f = by(id);
+    if (!f) { p.push('no ' + id + ' finding'); continue; }
+    for (const field of ['severity', 'status', 'evidence', 'confidence', 'where', 'headline']) {
+      if (!f[field]) p.push(id + ' has no ' + field);
+    }
+  }
+  const reg = by('regression');
+  if (reg && reg.where !== 'tests/checkout.spec.js:7') p.push('regression where: ' + reg.where);
+  const fe = by('frontend');
+  if (fe && fe.status !== 'verification required') p.push('a code-read finding is shown as ' + fe.status);
+  const db = by('data');
+  if (db && db.evidence !== 'runtime confirmed') p.push('an attack that ran is shown as ' + db.evidence);
+  // Worst first, and within one severity a proven break before an unproven one.
+  if (state.findings[0] && state.findings[0].severity !== 'CRITICAL') p.push('the first finding is ' + state.findings[0].severity);
+  const order = state.findings.map((f) => f.check);
+  if (order.indexOf('regression') > order.indexOf('frontend')) {
+    p.push('a HIGH that needs verification is listed above a HIGH that was confirmed: ' + JSON.stringify(order));
+  }
+  return p;
+})());
+
+check('a broken recording is not given an invented fix prompt', (() => {
+  const reg = state.findings.find((f) => f.check === 'regression');
+  if (!reg) return ['no regression finding'];
+  const p = [];
+  if (reg.fixPrompt) p.push('a prompt appeared that the run never wrote: ' + reg.fixPrompt);
+  if (!/npx kryptheon check/.test(reg.fixWhere || '')) p.push('it does not say where the real prompt is');
+  return p;
+})());
+
+check('runs are listed newest first, and nothing is verified yet', (() => {
+  const p = [];
+  if (state.runs.length !== 2 || state.runs[0].runAt !== '2026-09-29T10:00:00.000Z') p.push('runs: ' + JSON.stringify(state.runs));
+  if (state.verification.state !== 'not verified') p.push('verification: ' + state.verification.state);
+  return p;
+})());
+
+check('switching a check off keeps it off, in the store, and hides its findings', (() => {
+  const p = [];
+  const r = dashboard.setCheck(kept, 'frontend', false);
+  if (!r.ok) return ['refused: ' + r.why];
+  const saved = JSON.parse(fs.readFileSync(kept.config, 'utf8'));
+  if (saved.enabled.frontend !== false) p.push('config.json does not say frontend is off');
+  const after = dashboard.buildState(project);
+  if (after.findings.some((f) => f.check === 'frontend')) p.push('frontend findings still shown while it is off');
+  if (after.checks.find((c) => c.id === 'frontend').state !== 'switched off') p.push('frontend is not said to be off');
+  dashboard.setCheck(kept, 'frontend', true);
+  if (!dashboard.buildState(project).findings.some((f) => f.check === 'frontend')) p.push('switching it back on did not bring them back');
+  return p;
+})());
+
+check('what cannot be switched is refused, and says why', (() => {
+  const p = [];
+  if (dashboard.setCheck(kept, 'nonsense', true).ok) p.push('an unknown check was accepted');
+  const na = dashboard.setCheck(kept, 'performance', true);
+  if (na.ok) p.push('a not-available check was switched on');
+  else if (!/not available/.test(na.why)) p.push('the reason does not say not available: ' + na.why);
+  if (dashboard.setCheck(kept, 'frontend', 'yes').ok) p.push('a non-boolean was accepted');
+  return p;
+})());
+
+check('the dashboard writes nothing into the project', (() => {
+  const now = fs.readdirSync(project).sort().join(',');
+  return now === before ? [] : ['the project now holds: ' + now];
+})());
+
+check("the dashboard's own page and code have nothing to report to the frontend check", (() => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kryptheon-dash-self-'));
+  for (const f of ['kryptheon-dashboard.html', 'kryptheon-dashboard-page.js', 'kryptheon-dashboard.js']) {
+    fs.copyFileSync(path.join(__dirname, f), path.join(d, f));
+  }
+  const r = code.scanProject(d, { packageDir: __dirname });
+  fs.rmSync(d, { recursive: true, force: true });
+  if (!r.ran) return ['the read did not run: ' + r.why];
+  return r.findings.map((f) => f.file + ':' + f.line + ' ' + f.sink + ' ' + f.expression);
+})());
+
+function request(port, options, body) {
+  return new Promise((resolve) => {
+    const req = http.request(Object.assign({ host: '127.0.0.1', port: port }, options), (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+    });
+    req.on('error', (err) => resolve({ status: 0, body: err.message, headers: {} }));
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+(async () => {
+  const app = dashboard.createServer(project);
+  const port = await app.listen(0);
+  try {
+    const host = '127.0.0.1:' + port;
+    const page = await request(port, { path: '/', headers: { host: host } });
+    const token = (page.body.match(/name="kryptheon-token" content="([0-9a-f]+)"/) || [])[1];
+    check('the page is served on this machine, with its token and its locks', (() => {
+      const p = [];
+      if (app.server.address().address !== '127.0.0.1') p.push('listening on ' + app.server.address().address);
+      if (page.status !== 200) p.push('GET / answered ' + page.status);
+      if (!token || token !== app.token) p.push('the page does not carry this server\'s token');
+      if (!/default-src 'none'/.test(page.headers['content-security-policy'] || '')) p.push('no content security policy');
+      if (page.headers['access-control-allow-origin']) p.push('it allows other origins: ' + page.headers['access-control-allow-origin']);
+      return p;
+    })());
+
+    const rebound = await request(port, { path: '/api/state', headers: { host: 'attacker.example:' + port } });
+    check('a request that arrives under another name is refused (DNS rebinding)', rebound.status === 403 ? [] : ['answered ' + rebound.status]);
+
+    const post = (headers, body) => request(port, { method: 'POST', path: '/api/check', headers: Object.assign({ host: host, 'content-type': 'application/json' }, headers) }, body);
+    const noToken = await post({}, JSON.stringify({ id: 'data', on: false }));
+    const wrongToken = await post({ 'x-kryptheon-token': 'deadbeef' }, JSON.stringify({ id: 'data', on: false }));
+    const cfgBefore = fs.readFileSync(kept.config, 'utf8');
+    check('a change without this page\'s token is refused, and changes nothing', (() => {
+      const p = [];
+      if (noToken.status !== 403) p.push('no token: ' + noToken.status);
+      if (wrongToken.status !== 403) p.push('wrong token: ' + wrongToken.status);
+      if (JSON.parse(cfgBefore).enabled.data !== true) p.push('the config changed anyway');
+      return p;
+    })());
+
+    const good = await post({ 'x-kryptheon-token': token }, JSON.stringify({ id: 'data', on: false }));
+    check('a change with the token is saved', (() => {
+      const p = [];
+      if (good.status !== 200) p.push('answered ' + good.status + ' ' + good.body);
+      if (JSON.parse(fs.readFileSync(kept.config, 'utf8')).enabled.data !== false) p.push('not saved');
+      return p;
+    })());
+
+    const api = await request(port, { path: '/api/state', headers: { host: host } });
+    check('the state the page reads is the state built from the store', (() => {
+      if (api.status !== 200) return ['answered ' + api.status];
+      const s = JSON.parse(api.body);
+      const p = [];
+      if (s.project.storeDir !== kept.dir) p.push('store: ' + s.project.storeDir);
+      if (s.findings.some((f) => f.check === 'data')) p.push('data findings shown although data was switched off');
+      return p;
+    })());
+
+    // Running a check from the page. The runner here is a stand-in that records
+    // what it was asked to run and holds the first run open, so a second one
+    // arriving meanwhile can be seen being turned away.
+    const asked = [];
+    let release;
+    const held = new Promise((r) => (release = r));
+    const runner = dashboard.createServer(project, {
+      run: (id) => {
+        asked.push(id);
+        return asked.length === 1 ? held.then(() => ({ ok: true })) : { ok: true };
+      },
+    });
+    const runPort = await runner.listen(0);
+    try {
+      const runHost = '127.0.0.1:' + runPort;
+      const runPage = await request(runPort, { path: '/', headers: { host: runHost } });
+      const runToken = (runPage.body.match(/name="kryptheon-token" content="([0-9a-f]+)"/) || [])[1];
+      const run = (id, t) => request(runPort, { method: 'POST', path: '/api/run', headers: { host: runHost, 'content-type': 'application/json', 'x-kryptheon-token': t } }, JSON.stringify({ id: id }));
+      const first = run('frontend', runToken);
+      await new Promise((r) => setTimeout(r, 150));
+      const second = await run('frontend', runToken);
+      release();
+      const firstDone = await first;
+      const data = await run('data', runToken);
+      const na = await run('performance', runToken);
+      const noTok = await run('frontend', 'nope');
+      check('checks run from the page: only what can run, one at a time, with the token', (() => {
+        const p = [];
+        if (firstDone.status !== 200) p.push('frontend run answered ' + firstDone.status + ' ' + firstDone.body);
+        if (second.status !== 409) p.push('a second run during the first answered ' + second.status);
+        if (data.status !== 400) p.push('the database check, which needs a connection string, answered ' + data.status);
+        if (na.status !== 400) p.push('a not-available check answered ' + na.status);
+        if (noTok.status !== 403) p.push('a run without the token answered ' + noTok.status);
+        if (JSON.stringify(asked) !== JSON.stringify(['frontend'])) p.push('the runner was asked for ' + JSON.stringify(asked));
+        return p;
+      })());
+    } finally {
+      await runner.close();
+    }
+
+    // And after every request above: still nothing of Kryptheon's in the project.
+    check('the running dashboard wrote nothing into the project either', (() => {
+      const now = fs.readdirSync(project).sort().join(',');
+      return now === before ? [] : ['the project now holds: ' + now];
+    })());
+  } finally {
+    await app.close();
+  }
+
+  // The real command, in a real project: `kryptheon dashboard` prints its
+  // address, and the page's "Run now" for the frontend leaves a saved read.
+  const { spawn, spawnSync } = require('child_process');
+  const cli = path.join(__dirname, 'bin', 'kryptheon.js');
+  fs.mkdirSync(path.join(project, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(project, 'src', 'offer.js'),
+    'async function f(){ const r = await fetch("/o"); const o = await r.json(); box.innerHTML = `${o.text}`; }\n', 'utf8');
+  const beforeCli = fs.readdirSync(project).sort().join(',');
+  const child = spawn(process.execPath, [cli, 'dashboard'], { cwd: project, env: process.env });
+  let out = '';
+  child.stdout.on('data', (c) => (out += c));
+  try {
+    const started = Date.now();
+    while (!/http:\/\/127\.0\.0\.1:\d+\//.test(out) && Date.now() - started < 20000) await new Promise((r) => setTimeout(r, 100));
+    const address = (out.match(/http:\/\/127\.0\.0\.1:(\d+)\//) || [])[1];
+    let saved = null;
+    let ran = null;
+    if (address) {
+      const cliHost = '127.0.0.1:' + address;
+      const cliPage = await request(Number(address), { path: '/', headers: { host: cliHost } });
+      const cliToken = (cliPage.body.match(/name="kryptheon-token" content="([0-9a-f]+)"/) || [])[1];
+      ran = await request(Number(address), { method: 'POST', path: '/api/run', headers: { host: cliHost, 'content-type': 'application/json', 'x-kryptheon-token': cliToken } }, JSON.stringify({ id: 'frontend' }));
+      try { saved = JSON.parse(fs.readFileSync(kept.codeFindings, 'utf8')); } catch (err) { saved = null; }
+    }
+    check('the dashboard command starts, and its Run now saves a real read to the store', (() => {
+      const p = [];
+      if (!address) return ['no address printed: ' + out.slice(0, 400)];
+      if (!ran || ran.status !== 200) p.push('Run now answered ' + (ran && ran.status) + ' ' + (ran && ran.body));
+      const found = saved && (saved.findings || []).find((f) => f.file === 'src/offer.js');
+      if (!found) p.push('no read of src/offer.js was saved: ' + JSON.stringify(saved && saved.findings));
+      else if (found.origin !== 'network') p.push('the saved finding says ' + found.origin);
+      const now = fs.readdirSync(project).sort().join(',');
+      if (now !== beforeCli) p.push('the project changed: ' + now);
+      return p;
+    })());
+  } finally {
+    child.kill();
+  }
+
+  // Run by a script, with no command, it must not start a server that never
+  // exits - it prints the usage and ends, as it always did.
+  const bare = spawnSync(process.execPath, [cli], { cwd: project, env: process.env, encoding: 'utf8', timeout: 20000, stdio: ['pipe', 'pipe', 'pipe'] });
+  check('with no command and no terminal, it prints the usage and exits', (() => {
+    const p = [];
+    if (bare.error) p.push('it did not exit: ' + bare.error.message);
+    if (bare.status !== 0) p.push('exit ' + bare.status);
+    if (!/npx kryptheon dashboard/.test(bare.stdout || '')) p.push('the usage does not mention the dashboard');
+    if (/127\.0\.0\.1:\d+/.test(bare.stdout || '')) p.push('it started a server');
+    return p;
+  })());
+  fs.rmSync(project, { recursive: true, force: true });
+
+  let failures = 0;
+  for (const r of results) {
+    if (r.problems.length) {
+      failures++;
+      console.log('FAIL  ' + r.name);
+      r.problems.forEach((x) => console.log('      - ' + x));
+    } else {
+      console.log('PASS  ' + r.name);
+    }
+  }
+  console.log('');
+  if (failures) {
+    console.log(failures + ' check(s) failed.');
+    process.exit(1);
+  }
+  console.log('All ' + results.length + ' dashboard checks passed.');
+})();

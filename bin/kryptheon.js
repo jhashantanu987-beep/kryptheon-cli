@@ -86,6 +86,7 @@ function usage() {
   console.log('  npx kryptheon remove [name]  list the recordings, or remove one you no longer want');
   console.log('  npx kryptheon setup-ai       tell your AI assistant to check its work');
   console.log('  npx kryptheon code           read your frontend code for text inserted as HTML');
+  console.log('  npx kryptheon dashboard      open this project\'s dashboard (also: npx kryptheon, in a terminal)');
   console.log('');
   console.log('  add --quiet to check for one line when everything passes');
   console.log('  npx kryptheon --version      print the version you have installed');
@@ -1996,6 +1997,25 @@ function setupAi() {
 // and shown by the dashboard; forty prompts in a terminal is a wall nobody reads.
 const CODE_PROMPTS_SHOWN = 5;
 
+// The read itself, saved to the store. Shared by the command and the
+// dashboard's "Run now", so both leave the same record behind.
+function readCodeAndSave(opened) {
+  const reader = require(path.join(PACKAGE_DIR, 'kryptheon-code.js'));
+  const result = reader.scanProject(USER_DIR, { packageDir: PACKAGE_DIR });
+  if (!result.ran) return result;
+  try {
+    fs.writeFileSync(opened.codeFindings, JSON.stringify({
+      checkedAt: new Date().toISOString(),
+      filesRead: result.filesRead,
+      findings: result.findings,
+      unreadable: result.unreadable,
+    }, null, 2) + String.fromCharCode(10), 'utf8');
+  } catch (err) {
+    result.saveError = err.message;
+  }
+  return result;
+}
+
 function codeRead() {
   const here = project.inspectProject(USER_DIR);
   if (!here.ok) {
@@ -2005,8 +2025,7 @@ function codeRead() {
   const opened = openStore();
   if (!opened) return 1;
 
-  const reader = require(path.join(PACKAGE_DIR, 'kryptheon-code.js'));
-  const result = reader.scanProject(USER_DIR, { packageDir: PACKAGE_DIR });
+  const result = readCodeAndSave(opened);
   if (!result.ran) {
     console.error('');
     console.error('  I could not read your code this time: ' + result.why + '.');
@@ -2014,17 +2033,7 @@ function codeRead() {
     console.error('');
     return 2;
   }
-
-  try {
-    fs.writeFileSync(opened.codeFindings, JSON.stringify({
-      checkedAt: new Date().toISOString(),
-      filesRead: result.filesRead,
-      findings: result.findings,
-      unreadable: result.unreadable,
-    }, null, 2) + String.fromCharCode(10), 'utf8');
-  } catch (err) {
-    console.error('  (could not save this read: ' + err.message + ')');
-  }
+  if (result.saveError) console.error('  (could not save this read: ' + result.saveError + ')');
 
   const high = result.findings.filter((f) => f.severity === 'HIGH');
   const medium = result.findings.filter((f) => f.severity !== 'HIGH');
@@ -2066,6 +2075,64 @@ function codeRead() {
   }
   console.log('');
   return 0;
+}
+
+// --- dashboard --------------------------------------------------------------
+//
+// One page on this machine for everything Kryptheon knows about this project
+// (kryptheon-dashboard.js). Runs until Ctrl+C.
+
+const DASHBOARD_PORT = 4789;
+
+function runFromDashboard(id, opened) {
+  if (id === 'frontend') {
+    const result = readCodeAndSave(opened);
+    return result.ran ? { ok: true } : { ok: false, why: result.why };
+  }
+  if (id === 'regression') {
+    // The same command a person types, as a separate process, so the page
+    // stays answerable while a browser replays the flows.
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, [path.join(PACKAGE_DIR, 'bin', 'kryptheon.js'), 'check', '--quiet'], {
+        cwd: USER_DIR,
+        stdio: 'ignore',
+        env: process.env,
+      });
+      child.on('error', (err) => resolve({ ok: false, why: err.message }));
+      // A run that found broken flows is a run that finished; its results are
+      // in the history the page reads next.
+      child.on('close', (code) => resolve(code === 0 || code === 1 ? { ok: true, exit: code } : { ok: false, why: 'the run stopped with exit ' + code }));
+    });
+  }
+  return { ok: false, why: '"' + id + '" cannot be run from the dashboard' };
+}
+
+async function dashboardCommand() {
+  const here = project.inspectProject(USER_DIR);
+  if (!here.ok) {
+    for (const line of project.noProjectLines(here)) console.error(line);
+    return 1;
+  }
+  const opened = openStore();
+  if (!opened) return 1;
+  const dash = require(path.join(PACKAGE_DIR, 'kryptheon-dashboard.js'));
+  const app = dash.createServer(USER_DIR, { run: (id) => runFromDashboard(id, opened) });
+  let port;
+  try {
+    port = await app.listen(DASHBOARD_PORT);
+  } catch (err) {
+    // Taken - by another project's dashboard, most likely. Any free port will do.
+    port = await app.listen(0);
+  }
+  console.log('');
+  console.log('  Kryptheon dashboard for ' + path.basename(USER_DIR) + ':');
+  console.log('');
+  console.log('    http://127.0.0.1:' + port + '/');
+  console.log('');
+  console.log('  Open that address in your browser. It is only reachable from this');
+  console.log('  machine. Press Ctrl+C here to stop it.');
+  console.log('');
+  return new Promise(() => {});
 }
 
 // --- accept -----------------------------------------------------------------
@@ -2334,7 +2401,16 @@ async function main() {
     case 'version':
       console.log(packageVersion());
       return finishWith(0);
+    case 'dashboard':
+      return finishWith(await dashboardCommand());
     case undefined:
+      // One command starts Kryptheon - in a terminal a person is looking at.
+      // Run by a script or an AI tool there is nobody to open a page for, and
+      // a server that never exits would hang it, so it prints the usage as it
+      // always did.
+      if (process.stdin.isTTY && process.stdout.isTTY) return finishWith(await dashboardCommand());
+      usage();
+      return finishWith(0);
     case '-h':
     case '--help':
     case 'help':

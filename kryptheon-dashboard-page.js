@@ -279,6 +279,100 @@
     });
   }
 
+  /* ------------------------------ connect your AI tool ------------------------------ */
+
+  // The same set-up kryptheon.tech shows, so the two never disagree. Every
+  // step comes from that tool's own documentation, except where a tool is
+  // marked tested - there it was run by hand. Static text: nothing here comes
+  // from the project being checked.
+  var SERVER = { command: 'npx', args: ['-y', 'kryptheon-mcp'] };
+  var MCP_JSON = JSON.stringify({ mcpServers: { kryptheon: SERVER } }, null, 2);
+  var VSCODE_JSON = JSON.stringify({ servers: { kryptheon: SERVER } }, null, 2);
+  var AI_TOOLS = [
+    { id: 'claude-code', name: 'Claude Code', tested: true,
+      steps: ['Run this once, in any terminal. That is the whole set-up.'],
+      code: 'claude mcp add kryptheon -- npx -y kryptheon-mcp', file: 'terminal' },
+    { id: 'cursor', name: 'Cursor', tested: false,
+      oneClick: { href: 'cursor://anysphere.cursor-deeplink/mcp/install?name=kryptheon&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImtyeXB0aGVvbi1tY3AiXX0=', label: 'Add to Cursor' },
+      steps: ['Press Add to Cursor. Cursor asks you to confirm - say yes.', 'Or by hand: paste the config into mcp.json in the .cursor folder of your home folder.'],
+      code: MCP_JSON, file: '~/.cursor/mcp.json' },
+    { id: 'vscode', name: 'VS Code', tested: false,
+      oneClick: { href: 'vscode:mcp/install?' + encodeURIComponent(JSON.stringify({ name: 'kryptheon', command: 'npx', args: ['-y', 'kryptheon-mcp'] })), label: 'Install in VS Code' },
+      steps: ['Press Install in VS Code and confirm.', 'Or by hand: run MCP: Add Server from the Command Palette, or put the config in .vscode/mcp.json - VS Code calls the list "servers", not "mcpServers".'],
+      code: VSCODE_JSON, file: '.vscode/mcp.json' },
+    { id: 'antigravity', name: 'Antigravity', tested: false,
+      steps: ['Open Settings, bottom left, then Customizations, then Add MCP. The MCP Store opens.', 'Click Manage MCP Servers, then View raw config.', 'Paste the config and save. Antigravity reloads it by itself.'],
+      code: MCP_JSON, file: '~/.gemini/config/mcp_config.json' },
+    { id: 'windsurf', name: 'Windsurf', tested: false,
+      steps: ['In the Cascade panel, open the ... menu at the top right and click Open MCP config file.', 'Paste the config and save.'],
+      note: 'Windsurf is Devin Desktop now. Use the menu rather than hunting for the file: newer versions keep it in %APPDATA%\\devin, older ones in .codeium\\windsurf.',
+      code: MCP_JSON, file: 'mcp_config.json' },
+    { id: 'claude-desktop', name: 'Claude Desktop', tested: false,
+      steps: ['From the Claude menu choose Settings..., then Developer, then Edit Config.', 'Paste the config and save.', 'Quit Claude completely - not just the window - and open it again.'],
+      code: MCP_JSON, file: 'claude_desktop_config.json' },
+    { id: 'codex', name: 'Codex', tested: false,
+      steps: ['Run this once, in any terminal.'],
+      code: 'codex mcp add kryptheon -- npx -y kryptheon-mcp', file: 'terminal' },
+  ];
+  var aiTool = 'claude-code';
+
+  function renderAI() {
+    var tabs = byId('aiTabs');
+    var panel = byId('aiPanel');
+    if (!tabs || !panel) return;
+    clear(tabs);
+    clear(panel);
+    AI_TOOLS.forEach(function (t, i) {
+      var b = el('button', 'ai-tab' + (t.id === aiTool ? ' on' : ''));
+      b.type = 'button';
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-selected', t.id === aiTool ? 'true' : 'false');
+      b.appendChild(el('span', 'ai-num', String(i + 1).padStart(2, '0')));
+      b.appendChild(el('span', 'ai-name', t.name));
+      if (t.oneClick) b.appendChild(el('span', 'ai-tag', '1-click'));
+      b.addEventListener('click', function () { aiTool = t.id; renderAI(); });
+      tabs.appendChild(b);
+    });
+    var tool = AI_TOOLS.filter(function (t) { return t.id === aiTool; })[0] || AI_TOOLS[0];
+    panel.appendChild(el('span', 'ai-badge' + (tool.tested ? ' tested' : ''), tool.tested ? 'Tested by hand' : "From " + tool.name + "'s own docs - not tested by hand yet"));
+    panel.appendChild(el('h4', null, tool.name));
+    if (tool.oneClick) {
+      var oc = el('div', 'ai-oneclick');
+      var link = el('a', 'btn sun', tool.oneClick.label + ' →');
+      link.href = tool.oneClick.href;
+      oc.appendChild(link);
+      oc.appendChild(el('small', null, 'or by hand, below'));
+      panel.appendChild(oc);
+    }
+    var ol = el('ol', 'ai-steps');
+    tool.steps.forEach(function (s, i) {
+      var li = el('li');
+      li.appendChild(el('span', null, String(i + 1)));
+      li.appendChild(el('div', null, s));
+      ol.appendChild(li);
+    });
+    panel.appendChild(ol);
+    var plate = el('div', 'ai-plate');
+    var bar = el('div', 'ai-plate-bar');
+    bar.appendChild(el('span', null, tool.file));
+    var cp = el('button', null, 'Copy');
+    cp.type = 'button';
+    cp.addEventListener('click', function () { copy(tool.code, tool.file === 'terminal' ? 'Command copied - run it in a terminal' : 'Config copied - paste it into ' + tool.file); });
+    bar.appendChild(cp);
+    plate.appendChild(bar);
+    plate.appendChild(el('pre', null, tool.code));
+    panel.appendChild(plate);
+    if (tool.note) panel.appendChild(el('p', 'ai-note', tool.note));
+    if (tool.file !== 'terminal') {
+      panel.appendChild(el('p', 'ai-note', 'On Windows, if it says it cannot start npx: use "command": "cmd" and "args": ["/c", "npx", "-y", "kryptheon-mcp"] instead.'));
+    }
+    panel.appendChild(el('p', 'ai-note', 'To let it check your database too, add "env": { "KN_DATABASE_URL": "postgresql://..." } to the kryptheon entry. Never paste the connection string into the chat - that puts the password to your whole database in a transcript.'));
+    var then = el('p', 'ai-then');
+    then.appendChild(document.createTextNode('Then just ask your assistant: '));
+    then.appendChild(el('b', null, '“Check my app.”'));
+    panel.appendChild(then);
+  }
+
   /* ---------------------------------- findings ---------------------------------- */
 
   var statusFilter = 'all';
@@ -595,6 +689,7 @@
       .catch(function (err) { byId('subline').textContent = 'Could not load: ' + err.message; });
   }
 
+  renderAI();
   showView();
   load();
   // Not while something runs, and not while a finding is open being read.

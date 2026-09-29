@@ -204,7 +204,9 @@ function startSteps(checks, seen) {
     {
       id: 'record',
       title: 'Record your main flows',
-      why: 'Sign up, log in, pay - do each once while Kryptheon watches. It then knows what "working" looks like.',
+      // The lesson of a test where 26 bugs were planted before recording and
+      // none was caught: what is recorded is taken as right.
+      why: 'Sign up, log in, pay - do each once while Kryptheon watches. Record while your app works: what it sees is taken as right, so a bug already there when you record becomes part of "working".',
       state: seen.recordings ? 'done' : 'todo',
       at: null,
       count: seen.recordings,
@@ -221,7 +223,7 @@ function startSteps(checks, seen) {
     {
       id: 'data',
       title: 'Check your database',
-      why: 'Attacks a copy of your Postgres or Supabase database and reports what got in. Needs your connection string, so it runs in your terminal.',
+      why: 'Attacks a copy inside your Postgres or Supabase database and reports what got in; your own rows are not touched. It asks for the connection string - in Supabase: Project Settings, Database, Connection string, URI. Try it on a test project first. It runs in your terminal, so the string never reaches this page.',
       state: !on('data') ? 'off' : seen.nightAt ? 'done' : 'todo',
       at: seen.nightAt,
       action: on('data') ? { kind: 'command', command: 'npx kryptheon-night' } : null,

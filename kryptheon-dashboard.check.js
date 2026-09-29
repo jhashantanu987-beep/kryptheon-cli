@@ -222,6 +222,17 @@ check('what to do now: confirmed problems first, then steps, then things to veri
   return p;
 })());
 
+check('the steps say the two things people get wrong: record while it works, and where the database string is', (() => {
+  const p = [];
+  const steps = dashboard.startSteps(allOn, { codeAt: null, recordings: 0, lastRunAt: null, nightAt: null });
+  const rec = steps.find((s) => s.id === 'record');
+  const db = steps.find((s) => s.id === 'data');
+  if (!/Record while your app works/.test(rec.why)) p.push('the record step does not say to record while the app works: ' + rec.why);
+  if (!/Project Settings, Database, Connection string/.test(db.why)) p.push('the database step does not say where the string is: ' + db.why);
+  if (!/test project first/.test(db.why)) p.push('the database step does not advise a test project first');
+  return p;
+})());
+
 check('the page is handed the steps and the next action, built from the store', (() => {
   const p = [];
   if (!Array.isArray(state.steps) || state.steps.length !== 4) return ['steps: ' + JSON.stringify(state.steps)];

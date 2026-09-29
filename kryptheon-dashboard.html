@@ -157,6 +157,36 @@
   .cmd-copy { display: grid; place-items: center; width: 30px; height: 30px; flex: none; border: 1px solid var(--line-dark); color: var(--on-dark); transition: color 0.3s var(--ease), border-color 0.3s var(--ease); }
   .cmd-copy:hover { color: var(--orange); border-color: var(--orange); }
 
+  /* --- connect your AI tool: an index of tools, one tool's page ------------ */
+  .ai { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 34px; padding-top: 18px; }
+  @media (max-width: 900px) { .ai { grid-template-columns: minmax(0, 1fr); gap: 18px; } }
+  .ai-tabs { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+  @media (max-width: 900px) { .ai-tabs { flex-direction: row; flex-wrap: wrap; } }
+  .ai-tab { position: relative; display: flex; align-items: baseline; gap: 10px; padding: 13px 8px 13px 14px; text-align: left; border-bottom: 1px solid var(--line); transition: color 0.3s var(--ease), padding 0.3s var(--ease); }
+  .ai-tab .ai-num { font: 10px var(--mono); color: var(--muted); }
+  .ai-tab .ai-name { font-weight: 800; font-stretch: 74%; text-transform: uppercase; }
+  .ai-tab .ai-tag { margin-left: auto; font: 9px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  .ai-tab:hover, .ai-tab.on { color: var(--orange-deep); }
+  .ai-tab.on { padding-left: 20px; }
+  .ai-tab.on::before { content: ""; position: absolute; top: -1px; bottom: -1px; left: 0; width: 3px; background: var(--orange); }
+  .ai-panel h4 { margin: 10px 0 0; font-weight: 900; font-stretch: 63%; font-size: clamp(2rem, 4vw, 3rem); line-height: 0.95; text-transform: uppercase; }
+  .ai-badge { font: 10px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+  .ai-badge.tested { color: var(--orange-deep); }
+  .ai-steps { margin: 18px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+  .ai-steps li { display: grid; grid-template-columns: 40px minmax(0, 1fr); padding: 12px 0; font-size: 14px; line-height: 1.55; border-bottom: 1px solid var(--line); }
+  .ai-steps li span { font: 13px var(--mono); color: var(--orange); }
+  .ai-oneclick { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 18px; }
+  .ai-oneclick small { font: 10px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+  .ai-plate { margin-top: 18px; color: var(--on-dark); background: var(--ink); }
+  .ai-plate-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; font: 10.5px var(--mono); border-bottom: 1px solid var(--line-dark); }
+  .ai-plate-bar span { opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ai-plate-bar button { flex: none; padding: 6px 12px; font: 10px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; border: 1px solid var(--line-dark); transition: color 0.3s var(--ease), border-color 0.3s var(--ease); }
+  .ai-plate-bar button:hover { color: var(--orange); border-color: var(--orange); }
+  .ai-plate pre { margin: 0; padding: 16px 14px 18px; overflow-x: auto; font: 12.5px/1.7 var(--mono); white-space: pre; }
+  .ai-note { max-width: 66ch; margin: 14px 0 0; padding-left: 14px; font-size: 13.5px; line-height: 1.6; color: var(--muted); border-left: 2px solid var(--orange); }
+  .ai-then { margin-top: 20px; font-size: 14px; }
+  .ai-then b { font-weight: 900; font-stretch: 63%; font-size: 1.6rem; text-transform: uppercase; }
+
   /* --- tags: orange acts, ink states --------------------------------------- */
   .tag { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 9.5px; letter-spacing: 0.12em; white-space: nowrap; color: var(--muted); border: 1px solid var(--line); }
   .tag.ember, .tag.sun { color: var(--orange-deep); border-color: var(--orange); }
@@ -281,6 +311,13 @@
       <div class="card gap">
         <div class="card-head"><div><h3>Start here</h3><div class="c-sub">Do these in order. A step is done only once it has actually run.</div></div></div>
         <div class="steps" id="steps"></div>
+      </div>
+      <div class="card gap">
+        <div class="card-head"><div><h3>Connect your AI tool</h3><div class="c-sub">Optional - your assistant then checks its own work, and does not call a change done until the check passes</div></div></div>
+        <div class="ai">
+          <div class="ai-tabs" id="aiTabs" role="tablist" aria-label="Your AI tool"></div>
+          <div class="ai-panel" id="aiPanel" role="tabpanel"></div>
+        </div>
       </div>
     </section>
 

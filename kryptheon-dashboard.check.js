@@ -287,6 +287,35 @@ function request(port, options, body) {
       if (now !== beforeCli) p.push('the project changed: ' + now);
       return p;
     })());
+
+    // With the page open, a change is noticed by itself: no command typed.
+    // The watch polls every 2s and waits 4s of quiet, so this allows 20s.
+    let watched = null;
+    if (address) {
+      const cliHost = '127.0.0.1:' + address;
+      fs.writeFileSync(path.join(project, 'src', 'promo.js'),
+        'async function p(){ const r = await fetch("/p"); const d = await r.json(); el.innerHTML = `${d.t}`; }\n', 'utf8');
+      const started = Date.now();
+      while (Date.now() - started < 20000) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const s = await request(Number(address), { path: '/api/state', headers: { host: cliHost } });
+        const state = s.status === 200 ? JSON.parse(s.body) : null;
+        const hit = state && state.looks.find((l) => l.by === 'watch' && l.files.some((f) => f.path === 'src/promo.js'));
+        if (hit) {
+          watched = { look: hit, finding: state.findings.find((f) => /src\/promo\.js/.test(f.where)) };
+          break;
+        }
+      }
+    }
+    check('with the dashboard open, a change is noticed and checked with no command typed', (() => {
+      if (!watched) return ['no look by the watch saw src/promo.js within 20s'];
+      const p = [];
+      if (watched.look.newFindings !== 1) p.push('the look counted ' + watched.look.newFindings + ' new findings, expected 1');
+      if (!watched.finding) p.push('the new file\'s finding is not on the page');
+      const reg = watched.look.checks.find((c) => c.id === 'regression');
+      if (reg && /^ran/.test(reg.state)) p.push('the watch replayed the recordings by itself');
+      return p;
+    })());
   } finally {
     child.kill();
   }

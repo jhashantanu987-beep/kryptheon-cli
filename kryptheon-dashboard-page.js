@@ -113,9 +113,45 @@
     box.appendChild(table);
   }
 
+  function renderLooks(state, box) {
+    if (!state.looks || !state.looks.length) {
+      box.appendChild(el('p', 'empty', 'Kryptheon has not looked at a change yet. It does by itself while this page is open, ' +
+        'and whenever npx kryptheon verify runs.'));
+      return;
+    }
+    state.looks.forEach(function (look) {
+      var item = el('div', 'finding');
+      var tags = el('div', 'tags');
+      tags.appendChild(el('span', 'tag', look.by === 'watch' ? 'noticed by itself' : 'npx kryptheon verify'));
+      if (look.newFindings) tags.appendChild(el('span', 'tag sev-HIGH', look.newFindings + ' new'));
+      if (look.fixed) tags.appendChild(el('span', 'tag', look.fixed + ' fixed'));
+      if (look.goneWithFile) tags.appendChild(el('span', 'tag', look.goneWithFile + ' gone with its file'));
+      item.appendChild(tags);
+      item.appendChild(el('div', 'headline', look.first
+        ? 'Starting point'
+        : look.fileCount
+          ? look.fileCount + ' file' + (look.fileCount === 1 ? '' : 's') + ' changed, in ' + look.parts.join(', ')
+          : 'Nothing changed'));
+      item.appendChild(el('div', 'where', when(look.at)));
+      look.files.slice(0, 8).forEach(function (f) {
+        item.appendChild(el('div', 'where', f.state + '  ' + f.path + '  (' + f.part + ')'));
+      });
+      if (look.fileCount > 8) item.appendChild(el('div', 'where', '... and ' + (look.fileCount - 8) + ' more'));
+      look.dependencies.forEach(function (d) {
+        item.appendChild(el('div', 'where', 'package ' + d.name + ': ' + d.change + (d.to ? ' ' + d.to : '')));
+      });
+      look.checks.forEach(function (c) {
+        item.appendChild(el('div', 'detail', c.id + ': ' + c.state));
+      });
+      box.appendChild(item);
+    });
+  }
+
   function renderChanges(state) {
     var box = document.getElementById('changes');
     clear(box);
+    renderLooks(state, box);
+    box.appendChild(el('h2', null, 'Git'));
     if (!state.changes) {
       box.appendChild(el('p', 'empty', 'This folder is not a git repository, so there is no change history to show.'));
       return;

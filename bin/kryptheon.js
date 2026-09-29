@@ -85,6 +85,7 @@ function usage() {
   console.log('  npx kryptheon accept <name>  agree that one test\'s new result is the correct one');
   console.log('  npx kryptheon remove [name]  list the recordings, or remove one you no longer want');
   console.log('  npx kryptheon setup-ai       tell your AI assistant to check its work');
+  console.log('  npx kryptheon verify         after a change: what changed, what broke, what got fixed');
   console.log('  npx kryptheon code           read your frontend code for text inserted as HTML');
   console.log('  npx kryptheon dashboard      open this project\'s dashboard (also: npx kryptheon, in a terminal)');
   console.log('');
@@ -2077,6 +2078,107 @@ function codeRead() {
   return 0;
 }
 
+// --- verify -----------------------------------------------------------------
+//
+// The command for the end of an AI task: what changed since Kryptheon last
+// looked, which checks that calls for, run the ones that can run here, and
+// say what broke and what got fixed. "The AI said done" is not the answer;
+// this is. The looking itself is kryptheon-look.js, shared with the dashboard.
+
+function verify() {
+  const here = project.inspectProject(USER_DIR);
+  if (!here.ok) {
+    for (const line of project.noProjectLines(here)) console.error(line);
+    return 1;
+  }
+  const opened = openStore();
+  if (!opened) return 1;
+  const looker = require(path.join(PACKAGE_DIR, 'kryptheon-look.js'));
+
+  const result = looker.look(USER_DIR, {
+    beforeRun: (diff, now) => {
+      console.log('');
+      if (diff.first) {
+        console.log('  First look at this project: ' + Object.keys(now.files).length + ' files noted.');
+        console.log('  Next time, I will say exactly what changed since now.');
+      } else if (!diff.files.length) {
+        console.log('  Nothing changed since the last look.');
+      } else {
+        console.log('  WHAT CHANGED   ' + diff.files.length + ' file' + (diff.files.length === 1 ? '' : 's') + ', in: ' + diff.parts.join(', '));
+        for (const part of diff.parts) {
+          const inPart = diff.files.filter((f) => f.part === part);
+          console.log('');
+          console.log('    ' + part);
+          for (const f of inPart.slice(0, 15)) console.log('      ' + f.state.padEnd(9) + f.path);
+          if (inPart.length > 15) console.log('      ... and ' + (inPart.length - 15) + ' more');
+          if (part === 'dependencies') {
+            for (const d of diff.dependencies) {
+              console.log('      package ' + d.name + ': ' + (d.change === 'added' ? 'added ' + d.to : d.change === 'removed' ? 'removed (was ' + d.from + ')' : d.from + ' -> ' + d.to));
+            }
+          }
+        }
+      }
+    },
+    frontend: () => readCodeAndSave(opened),
+    regression: () => {
+      console.log('');
+      console.log('  Replaying your recordings...');
+      const r = spawnSync(process.execPath, [path.join(PACKAGE_DIR, 'bin', 'kryptheon.js'), 'check', '--quiet'], {
+        cwd: USER_DIR,
+        stdio: 'inherit',
+        env: process.env,
+      });
+      return r.status;
+    },
+  }, { by: 'verify' });
+
+  const { diff, plan, fresh, fixed, removed, openConfirmed, after } = result;
+  console.log('');
+  if (plan.length) {
+    console.log('  CHECKS');
+    for (const step of plan) console.log('    ' + step.id.padEnd(12) + step.state);
+  } else if (!diff.first && diff.files.length) {
+    console.log('  CHECKS   none apply to this change (' + diff.parts.join(', ') + ').');
+  }
+
+  console.log('');
+  if (diff.first) {
+    console.log('  STARTING POINT   ' + after.findings.length + ' finding' + (after.findings.length === 1 ? '' : 's') +
+      ' already here (see npx kryptheon dashboard). Only what changes from now on will be called new.');
+  } else {
+    if (fresh.length) {
+      console.log('  WHAT BROKE   ' + fresh.length + ' new');
+      for (const f of fresh) {
+        console.log('    ' + f.severity + '   ' + f.status + '   ' + f.where);
+        console.log('      ' + f.headline);
+      }
+    } else {
+      console.log('  WHAT BROKE   nothing new that the checks above could see.');
+    }
+    if (fixed.length) {
+      console.log('');
+      console.log('  WHAT GOT FIXED   ' + fixed.length);
+      for (const f of fixed) console.log('    ' + f.where + '   ' + f.headline);
+    }
+    if (removed.length) {
+      console.log('');
+      console.log('  GONE WITH ITS FILE   ' + removed.length + ' (the file was deleted - not the same as fixed)');
+      for (const f of removed) console.log('    ' + f.where + '   ' + f.headline);
+    }
+  }
+  if (openConfirmed.length) {
+    console.log('');
+    console.log('  Still broken: ' + openConfirmed.length + ' confirmed problem' + (openConfirmed.length === 1 ? '' : 's') + '. The fix prompts are in the dashboard.');
+  }
+  console.log('');
+  if (result.saveError) console.error('  (could not save this look: ' + result.saveError + ')');
+
+  // Non-zero while anything confirmed is broken - new or not - so an AI tool
+  // reading only the exit code is never told its work left things fine when
+  // they are not. Findings that only need a look do not count.
+  return openConfirmed.length || result.regressionExit === 1 ? 1 : 0;
+}
+
 // --- dashboard --------------------------------------------------------------
 //
 // One page on this machine for everything Kryptheon knows about this project
@@ -2132,6 +2234,24 @@ async function dashboardCommand() {
   console.log('  Open that address in your browser. It is only reachable from this');
   console.log('  machine. Press Ctrl+C here to stop it.');
   console.log('');
+
+  // While the page is open, Kryptheon notices changes by itself: once a change
+  // has settled, it looks, runs the fast checks, and the page shows what
+  // changed and what came of it. Recordings are replayed only from the page's
+  // Run now - a replay while the app is down would call every flow broken.
+  const looker = require(path.join(PACKAGE_DIR, 'kryptheon-look.js'));
+  looker.startWatch(USER_DIR, {
+    frontend: () => readCodeAndSave(opened),
+    regression: () => null,
+  }, {
+    onLook: (r) => {
+      if (r.diff.first) return;
+      const when = new Date().toLocaleTimeString();
+      console.log('  ' + when + '  ' + r.diff.files.length + ' file' + (r.diff.files.length === 1 ? '' : 's') + ' changed (' +
+        r.diff.parts.join(', ') + ') - ' + r.fresh.length + ' new, ' + r.fixed.length + ' fixed. See the page.');
+    },
+    onError: (err) => console.error('  (could not look at a change: ' + err.message + ')'),
+  });
   return new Promise(() => {});
 }
 
@@ -2396,6 +2516,8 @@ async function main() {
       break;
     case 'code':
       return finishWith(codeRead());
+    case 'verify':
+      return finishWith(verify());
     case '-v':
     case '--version':
     case 'version':

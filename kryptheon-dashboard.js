@@ -235,8 +235,25 @@ function buildState(root, env) {
     };
   });
 
+  // Every look Kryptheon took - by `verify`, or by the dashboard's own watch -
+  // newest first: what changed, what was run, and what came of it.
+  const looks = readHistory(paths.changes, 15).reverse().map((e) => ({
+    at: e.at,
+    by: e.by || 'verify',
+    first: !!e.first,
+    files: (e.files || []).slice(0, 30),
+    fileCount: (e.files || []).length,
+    parts: e.parts || [],
+    dependencies: e.dependencies || [],
+    checks: e.checks || [],
+    newFindings: e.newFindings || 0,
+    fixed: e.fixed || 0,
+    goneWithFile: e.goneWithFile || 0,
+  }));
+
   return {
     project: { name: path.basename(root), root: root, storeDir: paths.dir },
+    looks: looks,
     checks: checks,
     findings: findings,
     runs: history.slice().reverse().map((r) => ({ runAt: r.runAt, status: r.status, passed: r.passed, failed: r.failed, durationMs: r.durationMs })),

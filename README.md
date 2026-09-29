@@ -174,6 +174,10 @@ replays your recordings or reads your code from the page. It is only
 reachable from this machine; press Ctrl+C to stop it. From a script, use
 `npx kryptheon dashboard`.
 
+It opens on the one thing to do next, and under it "Start here": read your
+code, record your main flows, replay them, check your database - in that
+order, each marked done only once it has actually run.
+
 Checks that are not built yet are listed as "not available" - never as
 passed.
 

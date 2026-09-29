@@ -422,9 +422,16 @@ function createServer(root, options) {
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
       // The page loads nothing from anywhere else, and says so.
-      'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     });
     res.end(body);
+  };
+  // Files served as they are from next to this one. A missing one is a
+  // missing picture or font, never a stopped dashboard.
+  const ASSETS = {
+    '/logo.png': ['image/png', opts.logoFile || path.join(__dirname, 'kryptheon-logo.png')],
+    '/fonts/archivo.woff2': ['font/woff2', path.join(__dirname, 'kryptheon-archivo.woff2')],
+    '/fonts/spacemono.woff2': ['font/woff2', path.join(__dirname, 'kryptheon-spacemono.woff2')],
   };
   const json = (res, code, value) => send(res, code, 'application/json; charset=utf-8', JSON.stringify(value));
 
@@ -438,15 +445,15 @@ function createServer(root, options) {
     if (req.method === 'GET' && url.pathname === '/dashboard.js') {
       return send(res, 200, 'text/javascript; charset=utf-8', fs.readFileSync(path.join(__dirname, 'kryptheon-dashboard-page.js'), 'utf8'));
     }
-    if (req.method === 'GET' && url.pathname === '/logo.png') {
-      // A missing logo is a missing picture, never a stopped dashboard.
-      let logo;
+    if (req.method === 'GET' && Object.prototype.hasOwnProperty.call(ASSETS, url.pathname)) {
+      const [type, file] = ASSETS[url.pathname];
+      let body;
       try {
-        logo = fs.readFileSync(opts.logoFile || path.join(__dirname, 'kryptheon-logo.png'));
+        body = fs.readFileSync(file);
       } catch (err) {
         return send(res, 404, 'text/plain', 'Not found');
       }
-      return send(res, 200, 'image/png', logo);
+      return send(res, 200, type, body);
     }
     if (req.method === 'GET' && url.pathname === '/api/state') {
       return json(res, 200, buildState(root, env));

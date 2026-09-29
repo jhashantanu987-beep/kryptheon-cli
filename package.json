@@ -37,6 +37,9 @@
     "kryptheon-dashboard.html",
     "kryptheon-dashboard-page.js",
     "kryptheon-logo.png",
+    "kryptheon-fonts-OFL.txt",
+    "kryptheon-spacemono.woff2",
+    "kryptheon-archivo.woff2",
     "kryptheon-changes.js",
     "kryptheon-look.js"
   ],

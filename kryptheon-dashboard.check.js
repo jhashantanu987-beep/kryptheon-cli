@@ -287,6 +287,24 @@ function request(port, options, body) {
       return p;
     })());
 
+    // The page's two fonts come from this server too - the policy must let
+    // them in, and nothing else: no font from anywhere but here.
+    const fonts = await Promise.all(['/fonts/archivo.woff2', '/fonts/spacemono.woff2'].map((p) => request(port, { path: p, headers: { host: host } })));
+    check('the fonts the page uses are served by this same server, and allowed only from it', (() => {
+      const p = [];
+      const csp = page.headers['content-security-policy'] || '';
+      if (!/font-src 'self'(;|$)/.test(csp)) p.push('the policy does not allow fonts from this server: ' + csp);
+      if (/font-src[^;]*(https?:|\*|data:)/.test(csp)) p.push('the policy lets fonts in from elsewhere: ' + csp);
+      for (const [i, f] of fonts.entries()) {
+        const name = i ? 'spacemono' : 'archivo';
+        if (!page.body.includes('/fonts/' + name + '.woff2')) p.push('the page does not use /fonts/' + name + '.woff2');
+        if (f.status !== 200) p.push(name + ' answered ' + f.status);
+        if (f.headers['content-type'] !== 'font/woff2') p.push(name + ' served as ' + f.headers['content-type']);
+        if (!/^wOF2/.test(f.body)) p.push(name + ' is not a woff2 file');
+      }
+      return p;
+    })());
+
     const rebound = await request(port, { path: '/api/state', headers: { host: 'attacker.example:' + port } });
     check('a request that arrives under another name is refused (DNS rebinding)', rebound.status === 403 ? [] : ['answered ' + rebound.status]);
 

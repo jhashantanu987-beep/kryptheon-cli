@@ -249,7 +249,7 @@
       var row = el('div', 'step ' + s.state);
       var num = el('div', 'step-num');
       if (s.state === 'done') num.appendChild(icon('check', 18));
-      else num.textContent = i + 1;
+      else num.textContent = String(i + 1).padStart(2, '0');
       row.appendChild(num);
       var body = el('div', 'step-body');
       var head = el('div', 'step-head');

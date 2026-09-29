@@ -14,6 +14,8 @@
 //     history.jsonl   was kryptheon-history.jsonl
 //     test-results/   was test-results/ (Playwright's screenshots of a failure)
 //     night-last.json was .kryptheon-last.json (kryptheon-night)
+//     code-findings.json  the last frontend code read (kryptheon code)
+//     config.json     which checks are switched on (the dashboard)
 //
 // Only tests/ - the recordings the person made - stays in the project.
 //
@@ -40,6 +42,8 @@ const FILES = {
   history: 'history.jsonl',
   testResults: 'test-results',
   nightLast: 'night-last.json',
+  codeFindings: 'code-findings.json',
+  config: 'config.json',
 };
 
 // What older versions wrote into the project, and where each one goes now.
@@ -122,6 +126,8 @@ function pathsIn(dir) {
     history: path.join(dir, FILES.history),
     testResults: path.join(dir, FILES.testResults),
     nightLast: path.join(dir, FILES.nightLast),
+    codeFindings: path.join(dir, FILES.codeFindings),
+    config: path.join(dir, FILES.config),
   };
 }
 

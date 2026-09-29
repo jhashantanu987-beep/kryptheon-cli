@@ -85,6 +85,7 @@ function usage() {
   console.log('  npx kryptheon accept <name>  agree that one test\'s new result is the correct one');
   console.log('  npx kryptheon remove [name]  list the recordings, or remove one you no longer want');
   console.log('  npx kryptheon setup-ai       tell your AI assistant to check its work');
+  console.log('  npx kryptheon code           read your frontend code for text inserted as HTML');
   console.log('');
   console.log('  add --quiet to check for one line when everything passes');
   console.log('  npx kryptheon --version      print the version you have installed');
@@ -1984,6 +1985,89 @@ function setupAi() {
   return results.some((r) => r.action === 'failed') ? 1 : 0;
 }
 
+// --- code -------------------------------------------------------------------
+//
+// A read of the project's own frontend code for text inserted as HTML
+// (kryptheon-code.js). Nothing is run and nothing is sent; every finding is
+// "verification required", so the exit code is 0 unless the read could not
+// happen at all - a script must never take an unproven risk for a break.
+
+// How many fix prompts are printed in full. The rest are saved in the store
+// and shown by the dashboard; forty prompts in a terminal is a wall nobody reads.
+const CODE_PROMPTS_SHOWN = 5;
+
+function codeRead() {
+  const here = project.inspectProject(USER_DIR);
+  if (!here.ok) {
+    for (const line of project.noProjectLines(here)) console.error(line);
+    return 1;
+  }
+  const opened = openStore();
+  if (!opened) return 1;
+
+  const reader = require(path.join(PACKAGE_DIR, 'kryptheon-code.js'));
+  const result = reader.scanProject(USER_DIR, { packageDir: PACKAGE_DIR });
+  if (!result.ran) {
+    console.error('');
+    console.error('  I could not read your code this time: ' + result.why + '.');
+    console.error('  Nothing was checked - this is not a pass.');
+    console.error('');
+    return 2;
+  }
+
+  try {
+    fs.writeFileSync(opened.codeFindings, JSON.stringify({
+      checkedAt: new Date().toISOString(),
+      filesRead: result.filesRead,
+      findings: result.findings,
+      unreadable: result.unreadable,
+    }, null, 2) + String.fromCharCode(10), 'utf8');
+  } catch (err) {
+    console.error('  (could not save this read: ' + err.message + ')');
+  }
+
+  const high = result.findings.filter((f) => f.severity === 'HIGH');
+  const medium = result.findings.filter((f) => f.severity !== 'HIGH');
+  console.log('');
+  console.log('  I read ' + result.filesRead + ' file' + (result.filesRead === 1 ? '' : 's') + ' of your app\'s code.');
+  if (!result.findings.length) {
+    console.log('  I found no place where text that could come from outside the page is');
+    console.log('  inserted as HTML. That is what this read looks for, and only that.');
+  } else {
+    console.log('  ' + result.findings.length + ' place' + (result.findings.length === 1 ? '' : 's') +
+      ' where text may be inserted as HTML (' + high.length + ' HIGH, ' + medium.length + ' MEDIUM).');
+    console.log('  I did not run anything, so each one needs a look before it is called a bug.');
+    for (const f of high.concat(medium)) {
+      console.log('');
+      console.log('  ' + f.severity + '   ' + f.file + ':' + f.line + '   (verification required)');
+      console.log('    ' + f.headline);
+      console.log('    ' + f.sink + ':  ' + f.expression);
+    }
+    const prompted = high.slice(0, CODE_PROMPTS_SHOWN);
+    if (prompted.length) {
+      console.log('');
+      console.log('  ' + '-'.repeat(68));
+      console.log('  For the HIGH ones, paste this into your AI tool - one at a time:');
+      for (const f of prompted) {
+        console.log('');
+        f.fixPrompt.split(String.fromCharCode(10)).forEach((l) => console.log('    ' + l));
+      }
+    }
+    if (result.findings.length > prompted.length) {
+      console.log('');
+      console.log('  The fix for every one is saved in:');
+      console.log('    ' + opened.codeFindings);
+    }
+  }
+  if (result.unreadable.length) {
+    console.log('');
+    console.log('  What I could not read (unknown, not clear):');
+    for (const u of result.unreadable) console.log('    ' + u.file + ' - ' + u.why);
+  }
+  console.log('');
+  return 0;
+}
+
 // --- accept -----------------------------------------------------------------
 
 function baselineApi() {
@@ -2243,6 +2327,8 @@ async function main() {
     case 'accept':
       return finishWith(accept(rest.join(' ').trim()));
       break;
+    case 'code':
+      return finishWith(codeRead());
     case '-v':
     case '--version':
     case 'version':

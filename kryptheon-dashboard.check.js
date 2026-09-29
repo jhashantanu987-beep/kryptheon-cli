@@ -148,6 +148,83 @@ check('what cannot be switched is refused, and says why', (() => {
   return p;
 })());
 
+// "Start here": the steps, in order, and the one thing to do now.
+const allOn = dashboard.CHECKS.map((c) => ({ id: c.id, enabled: c.available }));
+const stepState = (steps) => steps.map((s) => s.id + ':' + s.state).join(' ');
+
+check('a new project starts at step 1, and nothing is done that has not run', (() => {
+  const p = [];
+  const steps = dashboard.startSteps(allOn, { codeAt: null, recordings: 0, lastRunAt: null, nightAt: null });
+  const want = 'frontend:todo record:todo regression:waiting data:todo';
+  if (stepState(steps) !== want) p.push('steps: ' + stepState(steps) + ', wanted ' + want);
+  const next = dashboard.nextAction([], steps);
+  if (next.kind !== 'step' || next.step !== 'frontend') p.push('next: ' + JSON.stringify(next));
+  const replay = steps.find((s) => s.id === 'regression');
+  if (replay.action) p.push('with no recordings, replay still offers: ' + JSON.stringify(replay.action));
+  return p;
+})());
+
+check('each step is done only once it has run, whatever it found, and the next one follows', (() => {
+  const p = [];
+  const read = dashboard.startSteps(allOn, { codeAt: '2026-09-29T10:00:00.000Z', recordings: 0, lastRunAt: null, nightAt: null });
+  if (read[0].state !== 'done') p.push('a read that found nothing is not done: ' + read[0].state);
+  if (dashboard.nextAction([], read).step !== 'record') p.push('after the read, next is not recording: ' + JSON.stringify(dashboard.nextAction([], read)));
+  const recorded = dashboard.startSteps(allOn, { codeAt: '2026-09-29T10:00:00.000Z', recordings: 2, lastRunAt: null, nightAt: null });
+  const replay = recorded.find((s) => s.id === 'regression');
+  if (replay.state !== 'todo' || !replay.action || replay.action.check !== 'regression') p.push('recorded but never replayed: ' + JSON.stringify(replay));
+  if (dashboard.nextAction([], recorded).step !== 'regression') p.push('next is not replaying');
+  const all = dashboard.startSteps(allOn, { codeAt: 'a', recordings: 2, lastRunAt: 'b', nightAt: 'c' });
+  if (stepState(all) !== 'frontend:done record:done regression:done data:done') p.push('all run: ' + stepState(all));
+  const allowed = new Set(['done', 'todo', 'off', 'waiting']);
+  for (const s of [].concat(read, recorded, all)) if (!allowed.has(s.state)) p.push(s.id + ' says ' + s.state);
+  return p;
+})());
+
+check('a switched-off check is "off" - never done, never asked for next', (() => {
+  const p = [];
+  const noDb = allOn.map((c) => (c.id === 'data' ? { id: 'data', enabled: false } : c));
+  const steps = dashboard.startSteps(noDb, { codeAt: 'a', recordings: 1, lastRunAt: 'b', nightAt: null });
+  const db = steps.find((s) => s.id === 'data');
+  if (db.state !== 'off') p.push('database step says ' + db.state);
+  if (db.action) p.push('an off step still offers ' + JSON.stringify(db.action));
+  const next = dashboard.nextAction([], steps);
+  if (next.kind !== 'quiet') p.push('with the rest done, next is ' + JSON.stringify(next));
+  // Every check that can be switched off, never run and never recorded.
+  for (const id of ['frontend', 'regression', 'data']) {
+    const off = allOn.map((c) => (c.id === id ? { id: id, enabled: false } : c));
+    const s = dashboard.startSteps(off, { codeAt: null, recordings: 1, lastRunAt: null, nightAt: null }).find((x) => x.id === id);
+    if (s.state !== 'off') p.push(id + ' switched off says ' + s.state);
+    if (s.action) p.push(id + ' switched off still offers ' + JSON.stringify(s.action));
+  }
+  return p;
+})());
+
+check('what to do now: confirmed problems first, then steps, then things to verify, then nothing', (() => {
+  const p = [];
+  const todo = dashboard.startSteps(allOn, { codeAt: null, recordings: 0, lastRunAt: null, nightAt: null });
+  const done = dashboard.startSteps(allOn, { codeAt: 'a', recordings: 1, lastRunAt: 'b', nightAt: 'c' });
+  const confirmed = { status: 'confirmed' };
+  const verify = { status: 'verification required' };
+  const a = dashboard.nextAction([verify, confirmed, confirmed], todo);
+  if (a.kind !== 'fix' || a.count !== 2 || a.view !== 'findings') p.push('with confirmed problems: ' + JSON.stringify(a));
+  const b = dashboard.nextAction([verify], todo);
+  if (b.kind !== 'step') p.push('a step not taken should come before a thing to verify: ' + JSON.stringify(b));
+  const c = dashboard.nextAction([verify], done);
+  if (c.kind !== 'verify' || c.count !== 1) p.push('only a thing to verify: ' + JSON.stringify(c));
+  const d = dashboard.nextAction([], done);
+  if (d.kind !== 'quiet') p.push('nothing at all: ' + JSON.stringify(d));
+  return p;
+})());
+
+check('the page is handed the steps and the next action, built from the store', (() => {
+  const p = [];
+  if (!Array.isArray(state.steps) || state.steps.length !== 4) return ['steps: ' + JSON.stringify(state.steps)];
+  if (state.steps.find((s) => s.id === 'frontend').state !== 'done') p.push('the saved read is not step 1 done');
+  if (state.steps.find((s) => s.id === 'regression').state !== 'done') p.push('the saved runs are not step 3 done');
+  if (!state.next || state.next.kind !== 'fix') p.push('with a broken recording, next is ' + JSON.stringify(state.next));
+  return p;
+})());
+
 check('the dashboard writes nothing into the project', (() => {
   const now = fs.readdirSync(project).sort().join(',');
   return now === before ? [] : ['the project now holds: ' + now];

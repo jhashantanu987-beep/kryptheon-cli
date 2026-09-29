@@ -178,6 +178,71 @@ function countRecordings(root) {
 }
 
 /**
+ * The order someone new should go in, one step at a time. A step is "done"
+ * only when it has actually run and left a record - never because nothing was
+ * found - and a switched-off check says "off", so an empty list is never read
+ * as a clean one.
+ */
+function startSteps(checks, seen) {
+  const on = (id) => (checks.find((c) => c.id === id) || {}).enabled;
+  return [
+    {
+      id: 'frontend',
+      title: 'Read your frontend code',
+      why: 'Finds places where text could be put into your page as HTML. Needs nothing from you.',
+      state: !on('frontend') ? 'off' : seen.codeAt ? 'done' : 'todo',
+      at: seen.codeAt,
+      action: on('frontend') ? { kind: 'run', check: 'frontend', label: seen.codeAt ? 'Read it again' : 'Read my code' } : null,
+    },
+    {
+      id: 'record',
+      title: 'Record your main flows',
+      why: 'Sign up, log in, pay - do each once while Kryptheon watches. It then knows what "working" looks like.',
+      state: seen.recordings ? 'done' : 'todo',
+      at: null,
+      count: seen.recordings,
+      action: { kind: 'command', command: 'npx kryptheon record <your app address>' },
+    },
+    {
+      id: 'regression',
+      title: 'Replay them',
+      why: 'Runs every recording against your app and compares each page with the last time it worked. Start your app first.',
+      state: !on('regression') ? 'off' : !seen.recordings ? 'waiting' : seen.lastRunAt ? 'done' : 'todo',
+      at: seen.lastRunAt,
+      action: on('regression') && seen.recordings ? { kind: 'run', check: 'regression', label: seen.lastRunAt ? 'Replay again' : 'Replay now' } : null,
+    },
+    {
+      id: 'data',
+      title: 'Check your database',
+      why: 'Attacks a copy of your Postgres or Supabase database and reports what got in. Needs your connection string, so it runs in your terminal.',
+      state: !on('data') ? 'off' : seen.nightAt ? 'done' : 'todo',
+      at: seen.nightAt,
+      action: on('data') ? { kind: 'command', command: 'npx kryptheon-night' } : null,
+    },
+  ];
+}
+
+/**
+ * The one thing to do now. Open confirmed problems come before everything; then
+ * the first step not taken; then what only needs a look; then nothing.
+ */
+function nextAction(findings, steps) {
+  const confirmed = findings.filter((f) => f.status === 'confirmed').length;
+  const toVerify = findings.length - confirmed;
+  if (confirmed) {
+    return { kind: 'fix', view: 'findings', count: confirmed,
+      title: confirmed === 1 ? 'Fix 1 confirmed problem' : 'Fix ' + confirmed + ' confirmed problems' };
+  }
+  const step = steps.find((s) => s.state === 'todo');
+  if (step) return { kind: 'step', step: step.id, title: step.title };
+  if (toVerify) {
+    return { kind: 'verify', view: 'findings', count: toVerify,
+      title: toVerify === 1 ? 'Look at 1 thing to verify' : 'Look at ' + toVerify + ' things to verify' };
+  }
+  return { kind: 'quiet', title: 'Nothing open' };
+}
+
+/**
  * Everything the page shows, from the store alone. Findings from every check
  * are put into one list, each carrying the same fields - severity, status,
  * evidence, confidence, where, what, and the fix - so the page can show them
@@ -292,6 +357,13 @@ function buildState(root, env) {
     };
   });
 
+  const steps = startSteps(checks, {
+    codeAt: code ? code.checkedAt : null,
+    recordings: recordings,
+    lastRunAt: lastRun ? lastRun.runAt : null,
+    nightAt: night ? nightWhen : null,
+  });
+
   // Every look Kryptheon took - by `verify`, or by the dashboard's own watch -
   // newest first: what changed, what was run, and what came of it.
   const looks = readHistory(paths.changes, 15).reverse().map((e) => ({
@@ -316,6 +388,8 @@ function buildState(root, env) {
     findings: findings,
     runs: history.slice().reverse().map((r) => ({ runAt: r.runAt, status: r.status, passed: r.passed, failed: r.failed, durationMs: r.durationMs })),
     recordings: recordings,
+    steps: steps,
+    next: nextAction(findings, steps),
     baselines: Object.keys(baselines).length,
     changes: recentChanges(root),
     // Part 3 is where a version gets verified. Until then this says so,
@@ -450,6 +524,8 @@ module.exports = {
   CHECKS: CHECKS,
   buildState: buildState,
   flowPrompt: flowPrompt,
+  startSteps: startSteps,
+  nextAction: nextAction,
   readConfig: readConfig,
   setCheck: setCheck,
   createServer: createServer,

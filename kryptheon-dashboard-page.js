@@ -188,11 +188,8 @@
     byId('builtBar').style.width = Math.round((built / state.checks.length) * 100) + '%';
     byId('builtNote').textContent = (state.checks.length - built) + ' more are listed as not available - never as passed.';
     var name = state.project.name || 'Project';
-    byId('avatar').textContent = name.replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || 'K';
-    byId('projName').textContent = name;
-    byId('projPath').textContent = state.project.root;
-    byId('projPath').title = state.project.root;
-    byId('subline').textContent = (state.looks || [])[0] ? 'Watching - last look ' + ago(state.looks[0].at) : 'Watching for changes';
+    var last = (state.looks || [])[0];
+    byId('subline').textContent = name + '  -  ' + (last ? 'watching, last look ' + ago(last.at) : 'watching for changes');
   }
 
   /* ------------------------------ right now + steps ------------------------------ */

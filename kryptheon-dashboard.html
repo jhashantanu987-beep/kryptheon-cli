@@ -72,10 +72,8 @@
   .meter { height: 10px; border-radius: 999px; margin-top: 10px; overflow: hidden; padding: 2px; }
   .meter i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--gold), var(--sun)); }
   .built p { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }
-  .account { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 16px; }
-  .avatar { width: 38px; height: 38px; flex: none; border-radius: 50%; display: grid; place-items: center; font-family: var(--display); font-weight: 700; background: linear-gradient(135deg, #ffd9b8, #f7a26c); color: #5a2a10; box-shadow: var(--raised-sm); }
-  .account .a-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .account .a-sub { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+  .site-link { display: block; text-align: center; padding: 8px; border-radius: 12px; font-size: 12.5px; font-weight: 600; color: var(--sun-deep); text-decoration: none; }
+  .site-link:hover { background: rgba(247, 162, 108, 0.14); }
 
   /* Topbar */
   .top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
@@ -221,13 +219,7 @@
       <div class="meter sunken"><i id="builtBar" style="width:0%"></i></div>
       <p id="builtNote"></p>
     </div>
-    <div class="account sunken">
-      <div class="avatar" id="avatar">K</div>
-      <div style="min-width:0">
-        <div class="a-name" id="projName">Project</div>
-        <div class="a-sub" id="projPath"></div>
-      </div>
-    </div>
+    <a class="site-link" href="https://kryptheon.tech" target="_blank" rel="noopener noreferrer">kryptheon.tech</a>
   </aside>
 
   <main>

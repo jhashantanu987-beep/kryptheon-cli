@@ -699,7 +699,9 @@ const cases = [
       // the recording as new and pass whatever the page does today.
       const v = await registryPair();
       if (!v) return ['could not ask the registry which versions exist'];
-      const dir = await folderWith(v.older, address);
+      const preStore = await preStoreVersion();
+      if (!preStore) return ['no published version older than ' + STORE_FROM + ' to test with'];
+      const dir = await folderWith(preStore, address);
       const me = copyClaiming(v.latest);
       const kept = require('./kryptheon-store.js').pathsFor(dir);
       fs.mkdirSync(kept.dir, { recursive: true });
@@ -726,7 +728,14 @@ const cases = [
 // The two newest versions on the registry, asked once. The update checks
 // install real published versions: a check that only imagines an install is
 // the one that fails on somebody's laptop.
+// The first published version that keeps its records in the store, outside the
+// project. It must match FIRST_STORE_VERSION in bin/kryptheon.js: a folder copy
+// this old or newer already reads the store, so it is safe to run; only copies
+// older than this must refuse once the records have moved out.
+const STORE_FROM = '0.1.20';
+
 let pair;
+let allVersions;
 function registryPair() {
   if (pair !== undefined) return Promise.resolve(pair);
   const args = ['view', 'kryptheon', 'versions', '--json'];
@@ -735,11 +744,23 @@ function registryPair() {
     : require('child_process').spawnSync('npm', args, { encoding: 'utf8' });
   try {
     const all = JSON.parse(r.stdout).filter((x) => /^\d+\.\d+\.\d+$/.test(x));
+    allVersions = all;
     pair = all.length >= 2 ? { older: all[all.length - 2], latest: all[all.length - 1] } : null;
   } catch (err) {
+    allVersions = null;
     pair = null;
   }
   return Promise.resolve(pair);
+}
+
+// The newest published version from before the store existed - genuinely reads
+// its baselines from the project. Used to prove such a copy refuses to run once
+// the records have moved out. Independent of how many store-aware versions ship.
+async function preStoreVersion() {
+  await registryPair();
+  if (!allVersions) return null;
+  const before = allVersions.filter((x) => project.olderVersion(x, STORE_FROM));
+  return before.length ? before[before.length - 1] : null;
 }
 
 // A folder set up by an older kryptheon, with one recording, installed once

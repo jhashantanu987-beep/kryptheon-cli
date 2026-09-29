@@ -200,6 +200,16 @@ function request(port, options, body) {
       return p;
     })());
 
+    const logo = await request(port, { path: '/logo.png', headers: { host: host } });
+    check('the logo the page shows is served by this same server', (() => {
+      const p = [];
+      if (!/src="\/logo\.png"/.test(page.body)) p.push('the page does not show /logo.png');
+      if (logo.status !== 200) p.push('GET /logo.png answered ' + logo.status);
+      if (logo.headers['content-type'] !== 'image/png') p.push('served as ' + logo.headers['content-type']);
+      if (!/^.PNG/.test(logo.body)) p.push('what came back is not a PNG');
+      return p;
+    })());
+
     const rebound = await request(port, { path: '/api/state', headers: { host: 'attacker.example:' + port } });
     check('a request that arrives under another name is refused (DNS rebinding)', rebound.status === 403 ? [] : ['answered ' + rebound.status]);
 
@@ -320,6 +330,23 @@ function request(port, options, body) {
     })());
   } finally {
     await app.close();
+  }
+
+  // A logo that is not there costs the picture, not the dashboard.
+  const noLogo = dashboard.createServer(project, { logoFile: path.join(project, 'no-such-logo.png') });
+  const noLogoPort = await noLogo.listen(0);
+  try {
+    const h = { host: '127.0.0.1:' + noLogoPort };
+    const missing = await request(noLogoPort, { path: '/logo.png', headers: h });
+    const after = await request(noLogoPort, { path: '/api/state', headers: h });
+    check('a missing logo answers 404, and the dashboard keeps answering', (() => {
+      const p = [];
+      if (missing.status !== 404) p.push('GET /logo.png answered ' + missing.status);
+      if (after.status !== 200) p.push('after it, /api/state answered ' + after.status);
+      return p;
+    })());
+  } finally {
+    await noLogo.close();
   }
 
   // The real command, in a real project: `kryptheon dashboard` prints its

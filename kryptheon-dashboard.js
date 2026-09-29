@@ -364,6 +364,16 @@ function createServer(root, options) {
     if (req.method === 'GET' && url.pathname === '/dashboard.js') {
       return send(res, 200, 'text/javascript; charset=utf-8', fs.readFileSync(path.join(__dirname, 'kryptheon-dashboard-page.js'), 'utf8'));
     }
+    if (req.method === 'GET' && url.pathname === '/logo.png') {
+      // A missing logo is a missing picture, never a stopped dashboard.
+      let logo;
+      try {
+        logo = fs.readFileSync(opts.logoFile || path.join(__dirname, 'kryptheon-logo.png'));
+      } catch (err) {
+        return send(res, 404, 'text/plain', 'Not found');
+      }
+      return send(res, 200, 'image/png', logo);
+    }
     if (req.method === 'GET' && url.pathname === '/api/state') {
       return json(res, 200, buildState(root, env));
     }

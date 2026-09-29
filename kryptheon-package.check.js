@@ -317,6 +317,32 @@ const cases = [
     },
   },
   {
+    // The dashboard reads its page, script and logo from next to itself. A
+    // file left out of "files" passes every check run from the repo, and is
+    // missing only for the people who installed the package.
+    name: 'every file the shipped code reads from its own folder is shipped',
+    run: () => {
+      if (packed.error) return ['the package could not be built'];
+      const inTar = new Set([...packed.files.keys()].map((n) => n.replace(/^package\//, '')));
+      const problems = [];
+      let seen = 0;
+      for (const rel of inTar) {
+        if (!/\.js$/.test(rel)) continue;
+        const text = packed.files.get('package/' + rel).toString('utf8');
+        const re = /path\.join\(__dirname, '([^']+)'\)/g;
+        let m;
+        while ((m = re.exec(text))) {
+          if (m[1] === '..') continue;
+          seen++;
+          const wanted = path.posix.join(path.posix.dirname(rel), m[1]);
+          if (!inTar.has(wanted)) problems.push(rel + ' reads ' + wanted + ', which is not in the package');
+        }
+      }
+      if (!seen) problems.push('found no file read from the package folder - this check is no longer looking at anything');
+      return problems;
+    },
+  },
+  {
     name: 'nothing in the repo looks like a cloud-sync conflict copy',
     run: () => {
       const hits = findConflictCopies();

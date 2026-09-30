@@ -2037,15 +2037,45 @@ function codeRead() {
   }
   if (result.saveError) console.error('  (could not save this read: ' + result.saveError + ')');
 
-  const high = result.findings.filter((f) => f.severity === 'HIGH');
-  const medium = result.findings.filter((f) => f.severity !== 'HIGH');
+  // Secret keys first: one in the page outranks every other finding, because
+  // with it none of the database's rules apply.
+  const keyed = result.findings.filter((f) => f.kind === 'secret-in-code');
+  const html = result.findings.filter((f) => f.kind !== 'secret-in-code');
+  const high = html.filter((f) => f.severity === 'HIGH');
+  const medium = html.filter((f) => f.severity !== 'HIGH');
   console.log('');
-  console.log('  I read ' + result.filesRead + ' file' + (result.filesRead === 1 ? '' : 's') + ' of your app\'s code.');
-  if (!result.findings.length) {
-    console.log('  I found no place where text that could come from outside the page is');
-    console.log('  inserted as HTML. That is what this read looks for, and only that.');
+  console.log('  I read ' + result.filesRead + ' file' + (result.filesRead === 1 ? '' : 's') + ' of your app\'s code,');
+  console.log('  for two things: secret keys written into it, and text inserted as HTML.');
+  console.log('');
+  if (!keyed.length) {
+    console.log('  No secret key is written into your code (Supabase service_role or secret,');
+    console.log('  Stripe, OpenAI, Anthropic or GitHub keys).');
   } else {
-    console.log('  ' + result.findings.length + ' place' + (result.findings.length === 1 ? '' : 's') +
+    console.log('  ' + keyed.length + ' secret key' + (keyed.length === 1 ? ' is' : 's are') +
+      ' written into your code. Fix ' + (keyed.length === 1 ? 'it' : 'these') + ' first.');
+    console.log('  The keys themselves are never shown or saved - only how they start.');
+    for (const f of keyed) {
+      console.log('');
+      console.log('  ' + f.severity + '   ' + f.file + ':' + f.line + '   (verification required)');
+      console.log('    ' + f.headline);
+      console.log('    ' + f.sink + ':  ' + f.expression);
+    }
+    for (const f of keyed.filter((k) => k.severity !== 'MEDIUM')) {
+      console.log('');
+      console.log('  ' + '-'.repeat(68));
+      console.log('  Paste this into your AI tool:');
+      console.log('');
+      f.fixPrompt.split(String.fromCharCode(10)).forEach((l) => console.log('    ' + l));
+    }
+    console.log('');
+    console.log('  ' + '-'.repeat(68));
+  }
+  console.log('');
+  if (!html.length) {
+    console.log('  I found no place where text that could come from outside the page is');
+    console.log('  inserted as HTML.');
+  } else {
+    console.log('  ' + html.length + ' place' + (html.length === 1 ? '' : 's') +
       ' where text may be inserted as HTML (' + high.length + ' HIGH, ' + medium.length + ' MEDIUM).');
     console.log('  I did not run anything, so each one needs a look before it is called a bug.');
     for (const f of high.concat(medium)) {
@@ -2066,7 +2096,7 @@ function codeRead() {
         f.fixPrompt.split(String.fromCharCode(10)).forEach((l) => console.log('    ' + l));
       }
     }
-    if (result.findings.length > prompted.length) {
+    if (html.length > prompted.length) {
       console.log('');
       console.log('  The fix for every one is saved in:');
       console.log('    ' + opened.codeFindings);

@@ -26,6 +26,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const keys = require('./kryptheon-keys.js');
 
 const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', 'out', '.next', '.nuxt', '.svelte-kit',
@@ -632,8 +633,25 @@ function scanProject(root, options) {
   }
   const findings = [];
   const unreadable = [];
+  // Secret keys, read from the same files. Kept apart from the HTML findings:
+  // they are already in their final shape, and they go first.
+  const secrets = [];
   let filesRead = 0;
-  for (const full of listFiles(root)) {
+  const files = listFiles(root);
+  const relOf = (full) => path.relative(root, full).split(path.sep).join('/');
+  // Which pages load which scripts, so a key in config.js can be said to
+  // reach the browser because index.html loads it - not guessed at.
+  const pages = [];
+  for (const full of files) {
+    if (!/\.html?$/i.test(full)) continue;
+    try {
+      if (fs.statSync(full).size <= MAX_BYTES) pages.push({ rel: relOf(full), source: fs.readFileSync(full, 'utf8') });
+    } catch (err) {
+      /* unreadable pages are reported below */
+    }
+  }
+  const loadedBy = keys.scriptsLoadedBy(pages);
+  for (const full of files) {
     let size = 0;
     try {
       size = fs.statSync(full).size;
@@ -647,6 +665,7 @@ function scanProject(root, options) {
     }
     const source = fs.readFileSync(full, 'utf8');
     filesRead++;
+    for (const k of keys.secretsIn(rel, source, loadedBy)) secrets.push(k);
     const pieces = PAGE_EXT.test(full) ? scriptsIn(source) : [{ code: source, line: 1 }];
     for (const piece of pieces) {
       try {
@@ -661,7 +680,7 @@ function scanProject(root, options) {
       }
     }
   }
-  return { ran: true, filesRead: filesRead, findings: findings.map(describe), unreadable: unreadable };
+  return { ran: true, filesRead: filesRead, findings: secrets.concat(findings.map(describe)), unreadable: unreadable };
 }
 
 const ORIGIN_WORDS = {

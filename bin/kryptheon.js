@@ -2019,7 +2019,7 @@ function readCodeAndSave(opened) {
 }
 
 function codeRead() {
-  const here = project.inspectProject(USER_DIR);
+  const here = project.inspectCodeFolder(USER_DIR);
   if (!here.ok) {
     for (const line of project.noProjectLines(here)) console.error(line);
     return 1;

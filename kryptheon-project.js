@@ -135,6 +135,28 @@ function inspectProject(dir, env) {
 }
 
 /**
+ * Whether `kryptheon code` may read this folder.
+ *
+ * The same as any command, with one opening: a plain site - index.html and
+ * a few scripts, no npm anywhere - has no package.json and never will. Found
+ * on a blind test: exactly such an app was refused, and nothing was read. The
+ * refusal exists so that a check does not run somebody else's recordings;
+ * reading the files in front of you cannot do that. A page at the top of the
+ * folder is what says it is a site. A home or system folder stays refused.
+ */
+function inspectCodeFolder(dir, env) {
+  const here = inspectProject(dir, env);
+  if (here.ok || here.reason !== 'no-package') return here;
+  let pages = [];
+  try {
+    pages = fs.readdirSync(dir).filter((name) => /\.html?$/i.test(name) && fs.statSync(path.join(dir, name)).isFile());
+  } catch (e) {
+    pages = [];
+  }
+  return pages.length ? Object.assign({}, here, { ok: true, reason: null, plainSite: true }) : here;
+}
+
+/**
  * Why this folder is not a project, and what to do instead.
  *
  * The folder is printed back because the commonest version of this is not
@@ -565,6 +587,7 @@ module.exports = {
   tidy: tidy,
   isHomeOrSystem: isHomeOrSystem,
   inspectProject: inspectProject,
+  inspectCodeFolder: inspectCodeFolder,
   noProjectLines: noProjectLines,
   noRecordingsLines: noRecordingsLines,
 };

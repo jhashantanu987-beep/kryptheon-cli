@@ -2040,12 +2040,14 @@ function codeRead() {
   // Secret keys first: one in the page outranks every other finding, because
   // with it none of the database's rules apply.
   const keyed = result.findings.filter((f) => f.kind === 'secret-in-code');
-  const html = result.findings.filter((f) => f.kind !== 'secret-in-code');
+  const redirects = result.findings.filter((f) => f.kind === 'open-redirect');
+  const html = result.findings.filter((f) => f.kind !== 'secret-in-code' && f.kind !== 'open-redirect');
   const high = html.filter((f) => f.severity === 'HIGH');
   const medium = html.filter((f) => f.severity !== 'HIGH');
   console.log('');
   console.log('  I read ' + result.filesRead + ' file' + (result.filesRead === 1 ? '' : 's') + ' of your app\'s code,');
-  console.log('  for two things: secret keys written into it, and text inserted as HTML.');
+  console.log('  for three things: secret keys written into it, redirects that go wherever');
+  console.log('  a link says, and text inserted as HTML.');
   console.log('');
   if (!keyed.length) {
     console.log('  No secret key is written into your code (Supabase service_role or secret,');
@@ -2067,6 +2069,24 @@ function codeRead() {
       console.log('');
       f.fixPrompt.split(String.fromCharCode(10)).forEach((l) => console.log('    ' + l));
     }
+    console.log('');
+    console.log('  ' + '-'.repeat(68));
+  }
+  console.log('');
+  if (!redirects.length) {
+    console.log('  No redirect sends people to an address taken from the page\'s URL.');
+  } else {
+    console.log('  ' + redirects.length + ' redirect' + (redirects.length === 1 ? ' goes' : 's go') +
+      ' wherever the page\'s URL says (verification required):');
+    for (const f of redirects) {
+      console.log('');
+      console.log('  ' + f.severity + '   ' + f.file + ':' + f.line);
+      console.log('    ' + f.sink + ' = ' + f.expression);
+    }
+    console.log('');
+    console.log('  Paste this into your AI tool:');
+    console.log('');
+    redirects[0].fixPrompt.split(String.fromCharCode(10)).forEach((l) => console.log('    ' + l));
     console.log('');
     console.log('  ' + '-'.repeat(68));
   }

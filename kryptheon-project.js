@@ -142,18 +142,25 @@ function inspectProject(dir, env) {
  * on a blind test: exactly such an app was refused, and nothing was read. The
  * refusal exists so that a check does not run somebody else's recordings;
  * reading the files in front of you cannot do that. A page at the top of the
- * folder is what says it is a site. A home or system folder stays refused.
+ * folder, or in one of the folders a site's pages usually live in, is what
+ * says it is a site - found on the next blind test, where the pages were in
+ * src/ and the read refused at the project's root. A home or system folder
+ * stays refused.
  */
+const PAGE_FOLDERS = ['', 'src', 'public', 'www', 'site', 'static', 'web', 'client', 'frontend'];
+
 function inspectCodeFolder(dir, env) {
   const here = inspectProject(dir, env);
   if (here.ok || here.reason !== 'no-package') return here;
-  let pages = [];
-  try {
-    pages = fs.readdirSync(dir).filter((name) => /\.html?$/i.test(name) && fs.statSync(path.join(dir, name)).isFile());
-  } catch (e) {
-    pages = [];
-  }
-  return pages.length ? Object.assign({}, here, { ok: true, reason: null, plainSite: true }) : here;
+  const hasPage = PAGE_FOLDERS.some((sub) => {
+    try {
+      const at = path.join(dir, sub);
+      return fs.readdirSync(at).some((name) => /\.html?$/i.test(name) && fs.statSync(path.join(at, name)).isFile());
+    } catch (e) {
+      return false;
+    }
+  });
+  return hasPage ? Object.assign({}, here, { ok: true, reason: null, plainSite: true }) : here;
 }
 
 /**

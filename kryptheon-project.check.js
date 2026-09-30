@@ -349,7 +349,7 @@ const cases = [
       const lookalike = folder();
       try {
         fs.writeFileSync(path.join(site, 'index.html'), '<!doctype html><div id="out"></div><script src="app.js"></script>', 'utf8');
-        fs.writeFileSync(path.join(site, 'app.js'), "document.querySelector('#out').innerHTML = location.hash.slice(1);", 'utf8');
+        fs.writeFileSync(path.join(site, 'app.js'), "document.querySelector('#out').innerHTML = location.hash.slice(1);\nlocation.href = new URLSearchParams(location.search).get('next');\n", 'utf8');
         fs.writeFileSync(path.join(scripts, 'app.js'), 'console.log(1);', 'utf8');
         fs.writeFileSync(path.join(lookalike, 'notes-html'), 'not a page', 'utf8');
         fs.mkdirSync(path.join(lookalike, 'page.html'));
@@ -358,6 +358,20 @@ const cases = [
         if (project.inspectCodeFolder(scripts, {}).ok) problems.push('a folder of scripts with no page was let in');
         if (project.inspectCodeFolder(lookalike, {}).ok) problems.push('a file ending in "html" without a dot, or a folder called page.html, counted as a page');
         if (project.inspectProject(site, {}).ok) problems.push('the opening leaked into every other command');
+        // Pages in src/ (the second blind test's layout) count; a page in any
+        // folder whatsoever does not.
+        const nested = folder();
+        const elsewhere = folder();
+        try {
+          fs.mkdirSync(path.join(nested, 'src'));
+          fs.writeFileSync(path.join(nested, 'src', 'index.html'), '<!doctype html>', 'utf8');
+          fs.mkdirSync(path.join(elsewhere, 'lib'));
+          fs.writeFileSync(path.join(elsewhere, 'lib', 'page.html'), '<!doctype html>', 'utf8');
+          if (!project.inspectCodeFolder(nested, {}).ok) problems.push('a site whose pages are in src/ was refused');
+          if (project.inspectCodeFolder(elsewhere, {}).ok) problems.push('a page in lib/ made the folder count as a site');
+        } finally {
+          for (const d of [nested, elsewhere]) fs.rmSync(d, { recursive: true, force: true });
+        }
         // A home folder with a page in it is still a home folder. Pointed at a
         // scratch one, so the page can be there without touching the real home.
         const savedHome = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
@@ -377,6 +391,9 @@ const cases = [
         const out = String(r.stdout || '') + String(r.stderr || '');
         if (/no project here/i.test(out)) problems.push('the command still refused the site:\n' + out.slice(0, 400));
         if (!/I read 2 files/.test(out) || !/innerHTML/.test(out)) problems.push('the code was not read and reported:\n' + out.slice(0, 600));
+        // The redirect in its own section, not counted among the HTML ones.
+        if (!/1 redirect goes wherever the page's URL says/.test(out)) problems.push('the redirect section is missing:\n' + out.slice(0, 900));
+        if (!/1 place where text may be inserted as HTML/.test(out)) problems.push('the redirect was counted as an HTML finding:\n' + out.slice(0, 900));
         const c = spawnSync(process.execPath, [CLI, 'check'], { cwd: site, encoding: 'utf8', timeout: 120000, env: process.env });
         if (c.status === 0 || !/no project here/i.test(String(c.stdout || '') + String(c.stderr || ''))) problems.push('check ran in a folder with no package.json');
       } finally {

@@ -159,6 +159,25 @@ const APP = {
     'let mixed = "a"; for (mixed of window.names) {} mx.innerHTML = mixed;',           // 20 unknown: a for-of assigns it
     'async function done() { const { data } = await supabase.from("tasks").select("*"); dn.innerHTML = data.filter((t) => t.done).map((t) => `<li>${t.name}</li>`).join(""); }', // 21 network: filter keeps the same rows
   ].join('\n'),
+  // Redirects to an address the page's own URL chose (blind test: VaultBoard's
+  // ?next= after login and on logout). Each reported case has a quiet twin.
+  'src/redirects.js': [
+    'const params = new URLSearchParams(location.search);',
+    'function afterLogin() { location.href = params.get("next") || "/"; }',                                    // 2 reported
+    'function out() { window.location = new URLSearchParams(window.location.search).get("to"); }',            // 3 reported: window.location =
+    'function back() { const next = params.get("next"); if (next && next.startsWith("/") && !next.startsWith("//")) location.href = next; }', // 4 quiet: checked
+    'function early() { const n = params.get("n"); if (!n.startsWith("/")) return; location.assign(n); }',   // 5 quiet: checked by an earlier if
+    'function loose() { const n = params.get("n"); if (n) location.replace(n); }',                            // 6 reported: "is there one" checks nothing
+    'function fixed() { location.href = `/login?next=${encodeURIComponent(location.pathname)}`; }',          // 7 quiet: starts at a fixed page
+    'function hashNav() { location.href = location.hash.slice(1); }',                                         // 8 reported: the hash
+    'function vetted() { location.href = safeRedirect(params.get("next")); }',                               // 9 quiet: somebody's own check
+    'function tab() { window.open(document.referrer); }',                                                     // 10 reported: the referrer
+    'function nextPage() { const q = useSearchParams(); router.push(q.get("returnTo")); }',                  // 11 reported: Next router
+    'function reload() { location.href = location.href; }',                                                   // 12 quiet: the same page
+    'const [sp] = useSearchParams(); function rr() { router.replace(sp.get("next") ?? "/"); }',              // 13 reported: React Router params, Next router
+    'function menu() { navigate(params.get("next")); }',                                                      // 14 quiet: navigate() stays on the site
+    'function find() { location.href = `/search?q=${params.get("q")}`; }',                                    // 15 quiet: the URL's value only fills in the query of a fixed page
+  ].join('\n'),
   'src/Card.jsx': [
     'export function Card({ body }) {',
     '  return <div dangerouslySetInnerHTML={{ __html: body }} />;',              // 2 unknown
@@ -333,6 +352,25 @@ check('...and a later value is followed, not guessed: literals and numbers stay 
   return p;
 })());
 
+check('a redirect to an address from the page\'s own URL is found, as open-redirect, with a fix that allows only own pages', (() => {
+  const p = [];
+  const want = { 2: 'location.href', 3: 'location', 6: 'location.replace()', 8: 'location.href', 10: 'window.open()', 11: 'router.push()', 13: 'router.replace()' };
+  for (const line of Object.keys(want)) {
+    const f = at('src/redirects.js', Number(line));
+    if (!f) p.push('redirects.js:' + line + ' was not reported');
+    else if (f.kind !== 'open-redirect' || f.sink !== want[line] || f.severity !== 'HIGH') p.push('redirects.js:' + line + ' was ' + [f.kind, f.sink, f.severity].join('/'));
+  }
+  const f = at('src/redirects.js', 2);
+  if (f && !/single "\/"/.test(f.fixPrompt.replace(/\s+/g, ' '))) p.push('the fix does not say to allow only own pages');
+  return p;
+})());
+
+check('...and a checked, fixed, vetted or same-page redirect is not', (() => {
+  const p = [];
+  for (const line of [1, 4, 5, 7, 9, 12, 14, 15]) if (at('src/redirects.js', line)) p.push('redirects.js:' + line + ' was reported: ' + at('src/redirects.js', line).expression);
+  return p;
+})());
+
 check('precision in map() callbacks: locals that are constants or numbers, and the index, are not reported', (() => {
   const p = [];
   for (const line of [4, 5]) {
@@ -412,6 +450,7 @@ check('exactly the expected findings, no more', (() => {
     'public/page.html:8', 'src/Card.jsx:2', 'src/Note.vue:1',
     'src/list.js:15', 'src/list.js:17', 'src/list.js:21', 'src/list.js:18', 'src/list.js:19', 'src/list.js:4', 'src/list.js:9',
     'src/origins.js:7', 'src/origins.js:12', 'src/origins.js:15', 'src/origins.js:16', 'src/origins.js:18', 'src/origins.js:20', 'src/origins.js:21',
+    'src/redirects.js:2', 'src/redirects.js:3', 'src/redirects.js:6', 'src/redirects.js:8', 'src/redirects.js:10', 'src/redirects.js:11', 'src/redirects.js:13',
   ];
   const got = result.findings.map((f) => f.file + ':' + f.line).sort();
   return JSON.stringify(got) === JSON.stringify(want.sort()) ? [] : ['expected ' + JSON.stringify(want) + '\n        got      ' + JSON.stringify(got)];

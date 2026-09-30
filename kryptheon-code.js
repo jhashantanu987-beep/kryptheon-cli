@@ -574,6 +574,116 @@ function paramOf(value, scope) {
 }
 
 /** Everything in one piece of code that turns a non-literal value into HTML. */
+/* -------------------------- open redirects -------------------------- */
+//
+// Found on a blind test: after signing in, the page sent the browser to
+// new URLSearchParams(location.search).get('next') - wherever a link said.
+// A phishing link then lands someone on the attacker's page straight from
+// the real login, and a javascript: value runs in the page. Reported only
+// when the address is taken from the page's own URL, and not when the code
+// checks it first: a redirect to a fixed page is the feature.
+
+/** location, window.location, document.location. */
+function isLocation(node) {
+  if (!node) return false;
+  if (node.type === 'Identifier') return node.name === 'location';
+  return node.type === 'MemberExpression' && !node.computed && node.property.name === 'location' &&
+    node.object.type === 'Identifier' && /^(window|document|self|top)$/.test(node.object.name);
+}
+
+/** Is this address taken from the page's own URL, from its start? */
+function readsUrl(node, scope, depth) {
+  if (!node || depth > 8) return false;
+  const again = (n) => readsUrl(n, scope, depth + 1);
+  switch (node.type) {
+    case 'MemberExpression':
+    case 'OptionalMemberExpression': {
+      const prop = !node.computed && node.property ? node.property.name : '';
+      if ((prop === 'search' || prop === 'hash') && isLocation(node.object)) return true;
+      if (prop === 'referrer' && node.object.type === 'Identifier' && node.object.name === 'document') return true;
+      // Next's pages router: router.query.next
+      let base = node.object;
+      while (base && /MemberExpression$/.test(base.type)) {
+        if (!base.computed && base.property.name === 'query' && base.object.type === 'Identifier' && base.object.name === 'router') return true;
+        base = base.object;
+      }
+      return false;
+    }
+    case 'CallExpression':
+    case 'OptionalCallExpression': {
+      const name = calleeName(node.callee);
+      if (name === 'get' && /MemberExpression$/.test(node.callee.type)) {
+        const params = node.callee.object;
+        if (params.type === 'NewExpression' && params.callee.name === 'URLSearchParams') return true;
+        if (/MemberExpression$/.test(params.type) && !params.computed && params.property.name === 'searchParams') return true;
+        if (params.type === 'Identifier' && scope) {
+          const b = scope.getBinding(params.name);
+          const init = b && b.path && b.path.node && b.path.node.init;
+          if (init && init.type === 'NewExpression' && init.callee.name === 'URLSearchParams') return true;
+          if (init && /MemberExpression$/.test(init.type) && !init.computed && init.property.name === 'searchParams') return true;
+          // Next and React Router: const params = useSearchParams(), or
+          // const [params] = useSearchParams().
+          if (init && /CallExpression$/.test(init.type) && calleeName(init.callee) === 'useSearchParams') return true;
+        }
+        return false;
+      }
+      if (/^(decodeURIComponent|decodeURI|String)$/.test(name) && node.callee.type === 'Identifier') return again(node.arguments[0]);
+      if (/^(trim|toString|slice|substring)$/.test(name) && /MemberExpression$/.test(node.callee.type)) return again(node.callee.object);
+      return false; // anything else - isSafeUrl(x), sanitize(x) - is somebody's check
+    }
+    case 'LogicalExpression':
+      return again(node.left) || again(node.right);
+    case 'ConditionalExpression':
+      return again(node.consequent) || again(node.alternate);
+    case 'TemplateLiteral':
+      // `login.html?next=${x}` starts somewhere fixed; `${x}` does not.
+      return node.quasis[0].value.cooked === '' && node.expressions.length > 0 && again(node.expressions[0]);
+    case 'BinaryExpression':
+      return node.operator === '+' && again(node.left);
+    case 'AwaitExpression':
+      return again(node.argument);
+    case 'Identifier': {
+      const b = scope && scope.getBinding(node.name);
+      if (!b || !b.path || b.kind === 'param') return false;
+      const values = [];
+      if (b.path.node && b.path.node.init) values.push(b.path.node.init);
+      for (const v of b.constantViolations || []) if (v.node.type === 'AssignmentExpression') values.push(v.node.right);
+      return values.some((v) => readsUrl(v, b.path.scope, depth + 1));
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Does the code check this name before sending the browser there? Any `if`
+ * or `? :` around the redirect, or an earlier `if` in the same block, whose
+ * test mentions it - an allow-list, a startsWith('/'), an origin compare.
+ */
+function checkedFirst(p, value, code) {
+  if (!value || value.type !== 'Identifier') return false;
+  const word = new RegExp('\\b' + value.name.replace(/\$/g, '\\$') + '\\b');
+  // A test that only asks whether there is a value - if (next) - checks
+  // nothing about where it goes. It has to compare or match something.
+  const VALIDATES = /startsWith|endsWith|\.test\(|includes|indexOf|match|origin|===|!==|allow|safe|valid|trusted/i;
+  const mentions = (n) => {
+    const text = n ? code.slice(n.start, n.end) : '';
+    return word.test(text) && VALIDATES.test(text);
+  };
+  let child = p;
+  for (let at = p.parentPath; at; child = at, at = at.parentPath) {
+    const n = at.node;
+    if ((n.type === 'IfStatement' || n.type === 'ConditionalExpression') && mentions(n.test)) return true;
+    if (n.type === 'LogicalExpression' && n.operator === '&&' && child.node === n.right && mentions(n.left)) return true;
+    if (n.type === 'BlockStatement' || n.type === 'Program') {
+      const index = n.body.indexOf(child.node);
+      if (n.body.slice(0, Math.max(0, index)).some((s) => s.type === 'IfStatement' && mentions(s.test))) return true;
+    }
+    if (/Function/.test(n.type)) break;
+  }
+  return false;
+}
+
 function sinksIn(parser, code, file, lineOffset) {
   const found = [];
   const ast = parser.babelParse(code, file, true);
@@ -612,17 +722,35 @@ function sinksIn(parser, code, file, lineOffset) {
       },
     },
   });
+  const redirect = (p, sink, value) => {
+    if (!value || !readsUrl(value, p.scope, 0) || checkedFirst(p, value, code)) return;
+    found.push({ kind: 'redirect', line: lineOf(p.node), sink: sink, expression: textOf(value), origin: 'url', parts: [] });
+  };
   parser.traverse(ast, {
     AssignmentExpression(p) {
       const left = p.node.left;
+      if (isLocation(left)) return redirect(p, 'location', p.node.right);
       if (left.type !== 'MemberExpression' || left.computed) return;
       const prop = left.property && left.property.name;
       if (prop === 'innerHTML' || prop === 'outerHTML') add(p.node, p.scope, prop, p.node.right);
+      else if (prop === 'href' && isLocation(left.object)) redirect(p, 'location.href', p.node.right);
     },
     CallExpression(p) {
       const callee = p.node.callee;
       const name = calleeName(callee);
       const args = p.node.arguments;
+      if ((name === 'assign' || name === 'replace') && callee.type === 'MemberExpression' && isLocation(callee.object)) {
+        return redirect(p, 'location.' + name + '()', args[0]);
+      }
+      if (name === 'open' && callee.type === 'MemberExpression' && callee.object.type === 'Identifier' && callee.object.name === 'window') {
+        return redirect(p, 'window.open()', args[0]);
+      }
+      // Next's router follows a full URL off the site. React Router's
+      // navigate() does not, so it is not a sink here.
+      if ((name === 'push' || name === 'replace') && callee.type === 'MemberExpression' &&
+          callee.object.type === 'Identifier' && callee.object.name === 'router') {
+        return redirect(p, 'router.' + name + '()', args[0]);
+      }
       if (name === 'insertAdjacentHTML' && args[1]) add(p.node, p.scope, 'insertAdjacentHTML', args[1]);
       else if ((name === 'write' || name === 'writeln') && callee.type === 'MemberExpression' &&
                callee.object && callee.object.name === 'document' && args[0]) {
@@ -762,8 +890,45 @@ function wrap(text, width) {
   return out.join('\n');
 }
 
+/** An open redirect, in the same shape as every other finding. */
+function describeRedirect(f) {
+  const fixPrompt = [
+    'My app may have an open redirect - please check it rather than assume it.',
+    '',
+    'In ' + f.file + ' at line ' + f.line + ', the page sends the browser to an address taken from its own URL:',
+    '',
+    '    ' + f.expression,
+    '',
+    'Anyone can send a link to this page with that part of the URL set to their own site - for example ' +
+      '?next=https://attacker.example. The person uses your real page, then lands on the attacker\'s, which ' +
+      'can ask for their password again. A value starting with javascript: can run script in your page.',
+    '',
+    'Fix it so only your own pages are allowed: accept the value only if it starts with a single "/" (not ' +
+      '"//" and not "/\\"), or check that new URL(value, location.origin).origin equals location.origin, and ' +
+      'go to your home page otherwise. Then check every other place that reads a next, redirect or returnTo ' +
+      'value the same way.',
+  ].map((p) => (p.startsWith('    ') ? p : wrap(p, 72))).join('\n');
+  return {
+    kind: 'open-redirect',
+    status: 'verification required',
+    evidence: 'code analysis',
+    severity: 'HIGH',
+    confidence: 'medium',
+    file: f.file,
+    line: f.line,
+    sink: f.sink,
+    expression: f.expression,
+    origin: 'url',
+    parts: [],
+    via: null,
+    headline: 'A redirect in ' + f.file + ':' + f.line + ' goes wherever the page\'s URL says.',
+    fixPrompt: fixPrompt,
+  };
+}
+
 /** One finding, in the shape every Kryptheon report uses. */
 function describe(f) {
+  if (f.kind === 'redirect') return describeRedirect(f);
   const severity = f.origin === 'unknown' ? 'MEDIUM' : 'HIGH';
   const how = f.sink === 'v-html' ? 'v-html' : f.sink;
   const where = f.via

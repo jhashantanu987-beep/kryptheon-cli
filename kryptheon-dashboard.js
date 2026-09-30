@@ -252,6 +252,28 @@ function nextAction(findings, steps) {
 }
 
 /**
+ * One sentence about the nightly run inside the database, or null when
+ * kryptheon-night has never been asked. Its four states are four different
+ * answers, and none of the other three may read as "nothing found": not set
+ * up, set up and never run, set up with nothing scheduled, and stopped.
+ */
+function nightlyLine(nightly) {
+  if (!nightly) return null;
+  const day = (iso) => String(iso || '').slice(0, 16).replace('T', ' ');
+  const read = ' (as of ' + day(nightly.readAt) + ')';
+  if (!nightly.installed) return 'Nightly run in your database: not set up. npx kryptheon-night install sets it up.' + read;
+  const idle = nightly.active ? '' : ' Nothing is scheduled, so it is not running - npx kryptheon-night install sets it up again.';
+  if (!nightly.ranAt) return 'Nightly run in your database: set up, and it has not run yet.' + idle + read;
+  const when = 'Nightly run in your database, ' + day(nightly.ranAt) + ': ';
+  if (nightly.stopped) return when + 'it could not check - ' + nightly.stopped + idle + read;
+  const n = (nightly.findings || []).length;
+  const skipped = (nightly.notChecked || []).length;
+  return when + (n ? n + (n === 1 ? ' problem found.' : ' problems found.')
+    : 'nothing got through ' + (nightly.attacksRun || 0) + ' attacks.') +
+    (skipped ? ' ' + skipped + ' ' + (skipped === 1 ? 'part was' : 'parts were') + ' not tested.' : '') + idle + read;
+}
+
+/**
  * Everything the page shows, from the store alone. Findings from every check
  * are put into one list, each carrying the same fields - severity, status,
  * evidence, confidence, where, what, and the fix - so the page can show them
@@ -264,6 +286,10 @@ function buildState(root, env) {
   const baselines = readJson(paths.baselines) || {};
   const code = readJson(paths.codeFindings);
   const night = readJson(paths.nightLast);
+  // What the nightly run inside the database last said, kept by
+  // kryptheon-night whenever it connects. Not the same answer as night:
+  // that one is the scan last run from this terminal.
+  const nightly = readJson(paths.nightNightly);
 
   const findings = [];
 
@@ -331,6 +357,33 @@ function buildState(root, env) {
     }
   }
 
+  // The nightly run's findings, said as coming from it. One both answers
+  // share is shown once, with the newer date - the same problem found twice
+  // is still one problem to fix.
+  if (nightly && nightly.ranAt && config.enabled.data) {
+    for (const f of nightly.findings || []) {
+      const item = {
+        check: 'data',
+        from: 'nightly',
+        severity: f.severity,
+        status: f.status || 'confirmed',
+        evidence: (f.status || 'confirmed') === 'confirmed' ? 'runtime confirmed' : 'code analysis',
+        confidence: (f.status || 'confirmed') === 'confirmed' ? 'high' : 'medium',
+        where: f.table + (f.column ? '.' + f.column : ''),
+        headline: f.headline,
+        detail: f.body || '',
+        fixPrompt: f.fixPrompt || '',
+        when: nightly.ranAt,
+      };
+      const same = findings.find((o) => o.check === 'data' && changes.findingKey(o) === changes.findingKey(item));
+      if (!same) findings.push(item);
+      else {
+        same.from = 'both';
+        if (!same.when || item.when > same.when) same.when = item.when;
+      }
+    }
+  }
+
   const rank = { 'HIGH CRITICAL': 0, CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
   findings.sort((a, b) => (rank[a.severity] ?? 9) - (rank[b.severity] ?? 9) ||
     (a.status === 'confirmed' ? 0 : 1) - (b.status === 'confirmed' ? 0 : 1));
@@ -359,9 +412,14 @@ function buildState(root, env) {
     else if (!config.enabled[c.id]) state = 'switched off';
     else if (c.id === 'regression') state = !recordings ? 'no recordings yet' : !lastRun ? 'never run' : lastRun.failed ? 'problems found' : 'last run held';
     else if (c.id === 'frontend') state = !code ? 'never run' : (code.findings || []).length ? 'things to check' : 'nothing found';
-    else if (c.id === 'data') state = !night ? 'never run here' : (night.findings || []).length ? 'problems found' : 'last run held';
+    else if (c.id === 'data') {
+      const ranNightly = nightly && nightly.ranAt && !nightly.stopped;
+      state = !night && !ranNightly ? 'never run here'
+        : findings.some((f) => f.check === 'data') ? 'problems found' : 'last run held';
+    }
     return {
       id: c.id, label: c.label, available: c.available, enabled: config.enabled[c.id], state: state, what: c.what || '',
+      nightly: c.id === 'data' ? nightlyLine(nightly) : null,
       // Runnable from the page: what needs nothing the page cannot supply. The
       // database check needs a connection string, which stays in the terminal.
       runnable: c.available && (c.id === 'frontend' || (c.id === 'regression' && recordings > 0)),
@@ -372,7 +430,7 @@ function buildState(root, env) {
     codeAt: code ? code.checkedAt : null,
     recordings: recordings,
     lastRunAt: lastRun ? lastRun.runAt : null,
-    nightAt: night ? nightWhen : null,
+    nightAt: [night ? nightWhen : null, nightly && nightly.ranAt].filter(Boolean).sort().pop() || null,
   });
 
   // Every look Kryptheon took - by `verify`, or by the dashboard's own watch -

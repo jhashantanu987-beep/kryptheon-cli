@@ -459,6 +459,7 @@
       meta.appendChild(sevTag(f.severity));
       meta.appendChild(statusTag(f));
       meta.appendChild(el('span', 'tag ' + (CHECK_TONE[f.check] || ''), CHECK_NAME[f.check] || f.check));
+      if (f.from === 'nightly' || f.from === 'both') meta.appendChild(el('span', 'tag', f.from === 'both' ? 'also nightly' : 'nightly'));
       meta.appendChild(el('span', 'f-where', f.where));
       left.appendChild(meta);
       head.appendChild(left);
@@ -564,6 +565,9 @@
       st.appendChild(el('span', 'tag ' + (STATE_TONE[c.state] || ''), c.state));
       card.appendChild(st);
       if (c.what) card.appendChild(el('div', 'c-what', c.what));
+      // What the nightly run inside the database last said - its own answer,
+      // not this terminal's, so it gets its own line.
+      if (c.nightly) card.appendChild(el('div', 'c-what', c.nightly));
       if (c.runnable && c.enabled) {
         var run = button('sm', 'play', 'Run now', function () { runChecks([c.id], run); });
         run.setAttribute('data-action', 'run');
@@ -600,6 +604,7 @@
     ['test-results/', 'screenshots and traces from runs that broke'],
     ['code-findings.json', 'the last read of your frontend code'],
     ['night-last.json', 'the last database check'],
+    ['night-nightly.json', 'what the nightly run inside your database last said'],
     ['snapshot.json', 'what your files looked like at the last look'],
     ['changes.jsonl', 'every look: what changed, what broke, what got fixed'],
     ['fixes.jsonl', 'every re-check and its verdict'],

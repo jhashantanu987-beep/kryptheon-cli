@@ -242,6 +242,81 @@ check('the page is handed the steps and the next action, built from the store', 
   return p;
 })());
 
+// The nightly run inside the database keeps its own answer, which
+// kryptheon-night copies into the store as night-nightly.json. Its own
+// project, so the counts above stay what they were.
+const nightProject = fs.mkdtempSync(path.join(os.tmpdir(), 'kryptheon-dash-nightly-'));
+const nightStore = store.open(nightProject);
+const dataOf = (s) => s.checks.find((c) => c.id === 'data');
+const writeNightly = (value) => fs.writeFileSync(nightStore.nightNightly, JSON.stringify(value), 'utf8');
+const ORDERS = { severity: 'CRITICAL', status: 'confirmed', table: 'orders', kind: 'exposed', headline: 'Your orders table can be read by anyone.', body: 'I read 2 rows.', fixPrompt: 'Fix the orders rule.' };
+const INVOICES = { severity: 'HIGH', status: 'confirmed', table: 'invoices', kind: 'crossed', headline: 'Your invoices table lets one customer read another one\'s rows.', body: 'I read 1.', fixPrompt: 'Fix invoices.' };
+
+check('with no nightly answer kept, nothing is said about it', (() => {
+  const s = dashboard.buildState(nightProject);
+  const p = [];
+  if (dataOf(s).nightly !== null) p.push('it said: ' + dataOf(s).nightly);
+  if (dataOf(s).state !== 'never run here') p.push('state ' + dataOf(s).state);
+  return p;
+})());
+
+check('the nightly run\'s findings are shown, marked as nightly, and the check is not "never run"', (() => {
+  writeNightly({ readAt: '2026-09-30T09:00:00.000Z', installed: true, scheduled: '0 3 * * *', active: true, source: 'public',
+    ranAt: '2026-09-30T03:00:00.000Z', stopped: null, attacksRun: 12, notChecked: [{ table: 'blobs' }], findings: [ORDERS] });
+  const s = dashboard.buildState(nightProject);
+  const p = [];
+  const f = s.findings.find((x) => x.where === 'orders');
+  if (!f) return ['the nightly finding is not shown'];
+  if (f.from !== 'nightly' || f.check !== 'data' || f.when !== '2026-09-30T03:00:00.000Z') p.push('shown as ' + JSON.stringify({ from: f.from, check: f.check, when: f.when }));
+  if (!/npx kryptheon recheck/.test(f.fixPrompt)) p.push('it has no way to prove the fix');
+  if (dataOf(s).state !== 'problems found') p.push('state ' + dataOf(s).state);
+  const line = dataOf(s).nightly || '';
+  if (!/2026-09-30 03:00: 1 problem found\. 1 part was not tested\./.test(line)) p.push('the line: ' + line);
+  if (!/as of 2026-09-30 09:00/.test(line)) p.push('the line does not say when it was read: ' + line);
+  if (s.steps.find((x) => x.id === 'data').state !== 'done') p.push('the database step is not done after a nightly run');
+  return p;
+})());
+
+check('a problem both answers found is shown once, with the newer date', (() => {
+  fs.writeFileSync(nightStore.nightLast, JSON.stringify({ findings: [ORDERS] }), 'utf8');
+  fs.utimesSync(nightStore.nightLast, new Date('2026-09-29T12:00:00Z'), new Date('2026-09-29T12:00:00Z'));
+  writeNightly({ readAt: '2026-09-30T09:00:00.000Z', installed: true, active: true, ranAt: '2026-09-30T03:00:00.000Z',
+    stopped: null, attacksRun: 12, notChecked: [], findings: [ORDERS, INVOICES] });
+  const s = dashboard.buildState(nightProject);
+  const p = [];
+  const orders = s.findings.filter((x) => x.where === 'orders');
+  if (orders.length !== 1) p.push('orders is shown ' + orders.length + ' times');
+  else {
+    if (orders[0].from !== 'both') p.push('orders is marked ' + orders[0].from);
+    if (orders[0].when !== '2026-09-30T03:00:00.000Z') p.push('orders dated ' + orders[0].when);
+  }
+  if (!s.findings.some((x) => x.where === 'invoices' && x.from === 'nightly')) p.push('the nightly-only finding is missing');
+  fs.unlinkSync(nightStore.nightLast);
+  return p;
+})());
+
+check('the nightly answers that are not "nothing found" are said as themselves', (() => {
+  const p = [];
+  const say = (value) => { writeNightly(value); return dashboard.buildState(nightProject); };
+  let s = say({ readAt: '2026-09-30T09:00:00.000Z', installed: false });
+  if (!/not set up/.test(dataOf(s).nightly || '') || s.findings.length || dataOf(s).state !== 'never run here') p.push('not installed: ' + dataOf(s).nightly + ' / ' + dataOf(s).state);
+  s = say({ readAt: '2026-09-30T09:00:00.000Z', installed: true, active: true, ranAt: null });
+  if (!/has not run yet/.test(dataOf(s).nightly || '') || dataOf(s).state !== 'never run here') p.push('never run: ' + dataOf(s).nightly + ' / ' + dataOf(s).state);
+  s = say({ readAt: '2026-09-30T09:00:00.000Z', installed: true, active: false, ranAt: '2026-09-30T03:00:00.000Z', stopped: null, attacksRun: 4, notChecked: [], findings: [] });
+  if (!/nothing got through 4 attacks\..*Nothing is scheduled/.test(dataOf(s).nightly || '') || dataOf(s).state !== 'last run held') p.push('held but unscheduled: ' + dataOf(s).nightly + ' / ' + dataOf(s).state);
+  s = say({ readAt: '2026-09-30T09:00:00.000Z', installed: true, active: true, ranAt: '2026-09-30T03:00:00.000Z', stopped: 'no tables', findings: [] });
+  if (!/could not check - no tables/.test(dataOf(s).nightly || '') || dataOf(s).state !== 'never run here') p.push('stopped: ' + dataOf(s).nightly + ' / ' + dataOf(s).state);
+  return p;
+})());
+
+check('switching the database check off hides the nightly findings too', (() => {
+  writeNightly({ readAt: '2026-09-30T09:00:00.000Z', installed: true, active: true, ranAt: '2026-09-30T03:00:00.000Z', stopped: null, attacksRun: 1, notChecked: [], findings: [ORDERS] });
+  dashboard.setCheck(store.pathsFor(nightProject), 'data', false);
+  const s = dashboard.buildState(nightProject);
+  dashboard.setCheck(store.pathsFor(nightProject), 'data', true);
+  return s.findings.some((x) => x.check === 'data') ? ['a switched-off check still shows nightly findings'] : [];
+})());
+
 check('the dashboard writes nothing into the project', (() => {
   const now = fs.readdirSync(project).sort().join(',');
   return now === before ? [] : ['the project now holds: ' + now];

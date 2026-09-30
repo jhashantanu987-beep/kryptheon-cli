@@ -188,8 +188,10 @@ function classify(node, scope, code, depth, aliases) {
         const returns = returnsOf(local);
         if (returns.length) return worst(returns.map((r) => classify(r.node, r.scope, code, depth + 1, aliases)));
       }
-      // String methods pass through whatever they were called on.
-      if (/^(trim|toUpperCase|toLowerCase|slice|substring|substr|replace|replaceAll|padStart|padEnd|concat|toString|join)$/.test(name) &&
+      // String methods pass through whatever they were called on, and so do
+      // the array methods that only pick or reorder items: notes.filter(...)
+      // holds the same notes.
+      if (/^(trim|toUpperCase|toLowerCase|slice|substring|substr|replace|replaceAll|padStart|padEnd|concat|toString|join|filter|sort|reverse|flat|toSorted|toReversed)$/.test(name) &&
           node.callee.type === 'MemberExpression') {
         return again(node.callee.object);
       }
@@ -426,6 +428,10 @@ function isCatchParam(node, scope) {
   return !!(binding && binding.path && binding.path.type === 'CatchClause');
 }
 
+// Bindings whose values are being followed right now, so a variable assigned
+// from itself (count = count + 1) is not followed round in a circle.
+const RESOLVING = new Set();
+
 /** What a name was set to, followed one step back when that says anything. */
 function fromBinding(id, scope, code, depth, aliases) {
   if (id && aliases && Object.prototype.hasOwnProperty.call(aliases, id.name)) return aliases[id.name];
@@ -435,10 +441,32 @@ function fromBinding(id, scope, code, depth, aliases) {
   if (binding.path && binding.path.type === 'CatchClause') return 'error';
   if (binding.kind === 'param') return fromCalls(binding, code, depth);
   const init = binding.path && binding.path.node && binding.path.node.init;
-  if (!init) return 'unknown';
-  if (readsResponseBody(init)) return 'network';
-  // Reassigned later: the first value says nothing reliable about the last.
-  if (binding.constantViolations && binding.constantViolations.length) return 'unknown';
+  const later = binding.constantViolations || [];
+  if (!init && !later.length) return 'unknown';
+  if (init && readsResponseBody(init)) return 'network';
+  // Reassigned later: as dangerous as the worst value it is ever given. Found
+  // on a blind test: `let notes = []`, then `notes = data` from the database,
+  // then rendered - read as "unknown" because the first value was an empty
+  // list. Only plain `=` and `+=` are followed; anything else - a destructure,
+  // a for-of - stays unknown, because what it assigns is not in one place.
+  if (later.length) {
+    if (RESOLVING.has(binding)) return 'safe'; // x = x + 1: itself adds nothing new
+    RESOLVING.add(binding);
+    try {
+      const origins = [];
+      if (init) origins.push(classify(init, binding.path.scope, code, depth + 1, aliases));
+      for (const v of later) {
+        const node = v.node;
+        if (node.type === 'UpdateExpression') continue; // x++ holds a number
+        if (node.type !== 'AssignmentExpression' || node.left.type !== 'Identifier' ||
+            (node.operator !== '=' && node.operator !== '+=')) return 'unknown';
+        origins.push(classify(node.right, v.scope, code, depth + 1, aliases));
+      }
+      return worst(origins);
+    } finally {
+      RESOLVING.delete(binding);
+    }
+  }
   // Destructured from a response body: const { name } = await res.json()
   // Aliases carry through: inside a map() callback, `const t = r.title` is as
   // dangerous as the item r it was read from.
@@ -495,6 +523,33 @@ function readsResponseBody(node) {
     const body = returnedBy(fn);
     return body && readsResponseBody(body);
   });
+  // Found on a blind test: const { data } = await supabase.from('notes')
+  // .select(...) is rows straight from the database, and was judged "unknown".
+  if (queriesSupabase(n)) return true;
+  // axios.get(url) - its .data is the server's body.
+  const callee = n.callee;
+  if (callee.type === 'Identifier' && callee.name === 'axios') return true;
+  if (callee.type === 'MemberExpression' && callee.object.type === 'Identifier' && callee.object.name === 'axios' &&
+      /^(get|post|put|patch|delete|head|request)$/.test(calleeName(callee))) return true;
+  return false;
+}
+
+// What a Supabase query chain does after .from('table'). Required, so that
+// Array.from(x) or somebody's own .from() is not read as the database.
+const QUERY_STEPS = /^(select|insert|update|upsert|delete|eq|neq|gt|gte|lt|lte|like|ilike|is|in|contains|containedBy|match|filter|or|not|order|limit|range|single|maybeSingle|textSearch|csv|throwOnError|returns|abortSignal)$/;
+
+/** supabase.from('notes').select(...)...  or  supabase.rpc('fn', ...). */
+function queriesSupabase(node) {
+  let c = node;
+  while (c && /CallExpression$/.test(c.type) && c.callee && /MemberExpression$/.test(c.callee.type)) {
+    const step = calleeName(c.callee);
+    const inner = c.callee.object;
+    if (step === 'rpc' && c.arguments[0] && /StringLiteral|TemplateLiteral/.test(c.arguments[0].type)) return true;
+    if (QUERY_STEPS.test(step) && inner && /CallExpression$/.test(inner.type) && calleeName(inner.callee) === 'from' &&
+        inner.callee.type === 'MemberExpression' && inner.arguments[0] &&
+        /StringLiteral|TemplateLiteral/.test(inner.arguments[0].type)) return true;
+    c = inner;
+  }
   return false;
 }
 

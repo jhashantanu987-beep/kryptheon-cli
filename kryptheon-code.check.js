@@ -133,6 +133,32 @@ const APP = {
     '  note2.innerHTML = `<p>Filter: tag="${escText(rows[0].tag)}"</p>`;',             // 27 safe: tag=" here is text between tags, not an attribute
     '}',
   ].join('\n'),
+  // Where a value came from when it is not read in place: a database query,
+  // and a variable given its real value later. The first is the blind test's
+  // shape (StudyNest), ranked MEDIUM "unknown" when it was the server's rows.
+  'src/origins.js': [
+    'let feed = [];',
+    'async function loadFeed() {',
+    '  const { data } = await supabase.from("notes").select("id, title").order("id");',
+    '  feed = data ?? [];',
+    '  paintFeed(feed);',
+    '}',
+    'function paintFeed(items) { list.innerHTML = items.map((n) => `<h3>${n.title}</h3>`).join(""); }', // 7 network: rows from the database, via a reassigned variable
+    'function search(q) { paintFeed(feed.filter((n) => n.title.includes(q))); }',
+    'let label = "Loading";',
+    'function ready() { label = "Ready"; top.innerHTML = `<b>${label}</b>`; }',       // 10 safe: every value it is given is a literal
+    'let html = "";',
+    'async function page() { html += await (await fetch("/p")).text(); box.innerHTML = html; }', // 12 network: added to with +=
+    'let count = 0;',
+    'function bump() { count++; count = count + 1; c.innerHTML = `<i>${count}</i>`; }', // 14 safe: only ever a number
+    'async function rpcRows() { const { data: rows } = await supabase.rpc("top_notes"); r.innerHTML = rows[0].body; }', // 15 network: an RPC
+    'async function ax() { const res = await axios.get("/api/x"); a.innerHTML = res.data.name; }', // 16 network: axios
+    'const local = { from: (x) => x };',
+    'lc.innerHTML = local.from("<b>hi</b>").trim();',                                  // 18 not the database: .from() with no query after it
+    'let pick; pick = "<b>fixed</b>"; pk.innerHTML = pick;',                           // 19 safe: no first value, one literal
+    'let mixed = "a"; for (mixed of window.names) {} mx.innerHTML = mixed;',           // 20 unknown: a for-of assigns it
+    'async function done() { const { data } = await supabase.from("tasks").select("*"); dn.innerHTML = data.filter((t) => t.done).map((t) => `<li>${t.name}</li>`).join(""); }', // 21 network: filter keeps the same rows
+  ].join('\n'),
   'src/Card.jsx': [
     'export function Card({ body }) {',
     '  return <div dangerouslySetInnerHTML={{ __html: body }} />;',              // 2 unknown
@@ -287,6 +313,26 @@ check('precision does not become blindness: a helper passing a parameter through
   return p;
 })());
 
+check('rows from a Supabase query, an RPC or axios are network, also through a variable given its value later', (() => {
+  const p = [];
+  for (const line of [7, 12, 15, 16, 21]) {
+    const f = at('src/origins.js', line);
+    if (!f) p.push('origins.js:' + line + ' was not reported');
+    else if (f.origin !== 'network' || f.severity !== 'HIGH') p.push('origins.js:' + line + ' was ' + f.origin + '/' + f.severity + ', expected network/HIGH');
+  }
+  return p;
+})());
+
+check('...and a later value is followed, not guessed: literals and numbers stay quiet, .from() alone is not the database', (() => {
+  const p = [];
+  for (const line of [10, 14, 19]) if (at('src/origins.js', line)) p.push('origins.js:' + line + ' was reported (' + at('src/origins.js', line).origin + ')');
+  const own = at('src/origins.js', 18);
+  if (own && own.origin === 'network') p.push('origins.js:18 - somebody\'s own .from() was read as a database query');
+  const loop = at('src/origins.js', 20);
+  if (!loop || loop.origin !== 'unknown') p.push('origins.js:20 (assigned by a for-of) should stay unknown, was ' + (loop ? loop.origin : 'not reported'));
+  return p;
+})());
+
 check('precision in map() callbacks: locals that are constants or numbers, and the index, are not reported', (() => {
   const p = [];
   for (const line of [4, 5]) {
@@ -365,6 +411,7 @@ check('exactly the expected findings, no more', (() => {
     'src/status.js:9', 'src/status.js:12', 'src/status.js:15', 'src/status.js:17', 'src/status.js:18',
     'public/page.html:8', 'src/Card.jsx:2', 'src/Note.vue:1',
     'src/list.js:15', 'src/list.js:17', 'src/list.js:21', 'src/list.js:18', 'src/list.js:19', 'src/list.js:4', 'src/list.js:9',
+    'src/origins.js:7', 'src/origins.js:12', 'src/origins.js:15', 'src/origins.js:16', 'src/origins.js:18', 'src/origins.js:20', 'src/origins.js:21',
   ];
   const got = result.findings.map((f) => f.file + ':' + f.line).sort();
   return JSON.stringify(got) === JSON.stringify(want.sort()) ? [] : ['expected ' + JSON.stringify(want) + '\n        got      ' + JSON.stringify(got)];

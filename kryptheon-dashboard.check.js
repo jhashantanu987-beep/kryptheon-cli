@@ -284,7 +284,8 @@ check('with no nightly answer kept, nothing is said about it', (() => {
 
 check('the nightly run\'s findings are shown, marked as nightly, and the check is not "never run"', (() => {
   writeNightly({ readAt: '2026-09-30T09:00:00.000Z', installed: true, scheduled: '0 3 * * *', active: true, source: 'public',
-    ranAt: '2026-09-30T03:00:00.000Z', stopped: null, attacksRun: 12, notChecked: [{ table: 'blobs' }], findings: [ORDERS] });
+    ranAt: '2026-09-30T03:00:00.000Z', stopped: null, attacksRun: 12, notChecked: [{ table: 'blobs' }],
+    findings: [ORDERS, { severity: 'HIGH', status: 'verification required', table: 'lookup_token', kind: 'privileged', headline: 'Anyone can call lookup_token.', body: '', fixPrompt: 'Check it.' }] });
   const s = dashboard.buildState(nightProject);
   const p = [];
   const f = s.findings.find((x) => x.where === 'orders');
@@ -293,8 +294,12 @@ check('the nightly run\'s findings are shown, marked as nightly, and the check i
   if (!/npx kryptheon recheck/.test(f.fixPrompt)) p.push('it has no way to prove the fix');
   if (dataOf(s).state !== 'problems found') p.push('state ' + dataOf(s).state);
   const line = dataOf(s).nightly || '';
-  if (!/2026-09-30 03:00: 1 problem found\. 1 part was not tested\./.test(line)) p.push('the line: ' + line);
-  if (!/as of 2026-09-30 09:00/.test(line)) p.push('the line does not say when it was read: ' + line);
+  // UTC said as UTC, and in this computer's own time - and a function to
+  // check counted apart from the problems proven.
+  const local = (iso) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const want = '2026-09-30 03:00 UTC (' + local('2026-09-30T03:00:00.000Z') + ' your time): 1 problem found. 1 thing to check. 1 part was not tested.';
+  if (line.indexOf(want) === -1) p.push('the line: ' + line + ' - wanted ' + want);
+  if (line.indexOf('(read ' + local('2026-09-30T09:00:00.000Z') + ')') === -1) p.push('the line does not say when it was read: ' + line);
   if (s.steps.find((x) => x.id === 'data').state !== 'done') p.push('the database step is not done after a nightly run');
   return p;
 })());

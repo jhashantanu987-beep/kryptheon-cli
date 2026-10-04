@@ -292,17 +292,25 @@ function nextAction(findings, steps) {
  */
 function nightlyLine(nightly) {
   if (!nightly) return null;
-  const day = (iso) => String(iso || '').slice(0, 16).replace('T', ' ');
-  const read = ' (as of ' + day(nightly.readAt) + ')';
+  // The database runs on UTC. Found on a real read-back: "03:00" was 08:30
+  // in India, and nothing said so - so both are said, and the moment it was
+  // read is said in this computer's own time.
+  const local = (iso) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const day = (iso) => String(iso || '').slice(0, 16).replace('T', ' ') + ' UTC (' + local(iso) + ' your time)';
+  const read = ' (read ' + local(nightly.readAt) + ')';
   if (!nightly.installed) return 'Nightly run in your database: not set up. Press "Set up nightly check" in Start here.' + read;
   const idle = nightly.active ? '' : ' Nothing is scheduled, so it is not running - press "Set it up again" in Start here.';
   if (!nightly.ranAt) return 'Nightly run in your database: set up, and it has not run yet.' + idle + read;
   const when = 'Nightly run in your database, ' + day(nightly.ranAt) + ': ';
   if (nightly.stopped) return when + 'it could not check - ' + nightly.stopped + idle + read;
-  const n = (nightly.findings || []).length;
+  // A function anyone can call is a thing to check, not a problem proven -
+  // counted apart, the way the terminal counts it.
+  const n = (nightly.findings || []).filter((f) => f.status !== 'verification required').length;
+  const toCheck = (nightly.findings || []).length - n;
   const skipped = (nightly.notChecked || []).length;
   return when + (n ? n + (n === 1 ? ' problem found.' : ' problems found.')
     : 'nothing got through ' + (nightly.attacksRun || 0) + ' attacks.') +
+    (toCheck ? ' ' + toCheck + (toCheck === 1 ? ' thing' : ' things') + ' to check.' : '') +
     (skipped ? ' ' + skipped + ' ' + (skipped === 1 ? 'part was' : 'parts were') + ' not tested.' : '') + idle + read;
 }
 

@@ -36,7 +36,7 @@ const CHECKS = [
   { id: 'frontend', label: 'Frontend: text inserted as HTML', available: true,
     what: 'Reads your frontend code for values put into the page with innerHTML and similar (npx kryptheon code).' },
   { id: 'data', label: 'Database: access rules, duplicates, orphans', available: true,
-    what: 'Attacks a copy of your Postgres/Supabase database (npx kryptheon-night). Needs a connection string, so it is run from the terminal and read here.' },
+    what: 'Attacks a copy of your Postgres/Supabase database (kryptheon-night). Paste the connection string in Start here; it is used for one run and never saved.' },
   { id: 'build', label: 'Build', available: false },
   { id: 'backend', label: 'Backend', available: false },
   { id: 'api', label: 'API', available: false },
@@ -190,43 +190,76 @@ function countRecordings(root) {
  * found - and a switched-off check says "off", so an empty list is never read
  * as a clean one.
  */
+// How often a step is done. Said on every step and button, because the two
+// kinds are done at different moments and mixing them up is how a check stops
+// being run: "one time" is setting up, "after every change" is the habit.
+const ONE_TIME = 'one time';
+const EVERY_CHANGE = 'after every change';
+
 function startSteps(checks, seen) {
   const on = (id) => (checks.find((c) => c.id === id) || {}).enabled;
+  const nightly = seen.nightly || null;
   return [
     {
       id: 'frontend',
       title: 'Read your frontend code',
+      when: EVERY_CHANGE,
       why: 'Finds places where text could be put into your page as HTML. Needs nothing from you.',
       state: !on('frontend') ? 'off' : seen.codeAt ? 'done' : 'todo',
       at: seen.codeAt,
-      action: on('frontend') ? { kind: 'run', check: 'frontend', label: seen.codeAt ? 'Read it again' : 'Read my code' } : null,
+      action: on('frontend') ? { kind: 'run', check: 'frontend', label: seen.codeAt ? 'Read it again' : 'Read my code', command: RUN_COMMAND.frontend } : null,
     },
     {
       id: 'record',
       title: 'Record your main flows',
+      when: ONE_TIME,
+      whenMore: 'again only when that flow changes',
       // The lesson of a test where 26 bugs were planted before recording and
       // none was caught: what is recorded is taken as right.
-      why: 'Sign up, log in, pay - do each once while Kryptheon watches. Record while your app works: what it sees is taken as right, so a bug already there when you record becomes part of "working".',
+      why: 'Sign up, log in, pay - do each once while Kryptheon watches. Record while your app works: what it sees is taken as right, so a bug already there when you record becomes part of "working". Start your app first, then put its address here.',
       state: seen.recordings ? 'done' : 'todo',
       at: null,
       count: seen.recordings,
-      action: { kind: 'command', command: 'npx kryptheon record <your app address>' },
+      action: { kind: 'record', label: seen.recordings ? 'Record another' : 'Record', command: 'npx kryptheon record <your app address>' },
     },
     {
       id: 'regression',
       title: 'Replay them',
+      when: EVERY_CHANGE,
       why: 'Runs every recording against your app and compares each page with the last time it worked. Start your app first.',
       state: !on('regression') ? 'off' : !seen.recordings ? 'waiting' : seen.lastRunAt ? 'done' : 'todo',
       at: seen.lastRunAt,
-      action: on('regression') && seen.recordings ? { kind: 'run', check: 'regression', label: seen.lastRunAt ? 'Replay again' : 'Replay now' } : null,
+      action: on('regression') && seen.recordings ? { kind: 'run', check: 'regression', label: seen.lastRunAt ? 'Replay again' : 'Replay now', command: RUN_COMMAND.regression } : null,
+    },
+    {
+      id: 'connect',
+      title: 'Connect your database',
+      when: ONE_TIME,
+      why: 'Paste your connection string - the steps are next to the box. It goes only to this dashboard on your machine and to kryptheon-night for the length of one run. It is never saved and never shown again; reload the page and it is gone. Try it on a test project first.',
+      state: !on('data') ? 'off' : seen.nightAt ? 'done' : 'todo',
+      at: null,
+      action: on('data') ? { kind: 'connect' } : null,
     },
     {
       id: 'data',
       title: 'Check your database',
-      why: 'Attacks a copy inside your Postgres or Supabase database and reports what got in; your own rows are not touched. It asks for the connection string - in Supabase: Project Settings, Database, Connection string, URI. Try it on a test project first. It runs in your terminal, so the string never reaches this page.',
+      when: EVERY_CHANGE,
+      why: 'Attacks a copy inside your Postgres or Supabase database and reports what got in; your own rows are not touched. You are shown exactly what it will do, and it waits for your yes.',
       state: !on('data') ? 'off' : seen.nightAt ? 'done' : 'todo',
       at: seen.nightAt,
-      action: on('data') ? { kind: 'command', command: 'npx kryptheon-night' } : null,
+      action: on('data') ? { kind: 'db', action: 'scan', label: 'Check my database', command: DB_ACTIONS.scan.command } : null,
+    },
+    {
+      id: 'nightly',
+      title: 'Check it every night',
+      when: ONE_TIME,
+      // Offered, never pressed for: an app can be checked well without it,
+      // so it is not what "do this next" points at.
+      optional: true,
+      why: 'Sets the same check up inside your database, to run by itself every night, and keeps the answer there for this page. It stays until you remove it.',
+      state: !on('data') ? 'off' : nightly && nightly.installed && nightly.active ? 'done' : 'todo',
+      at: nightly && nightly.ranAt ? nightly.ranAt : null,
+      action: on('data') ? { kind: 'nightly', installed: Boolean(nightly && nightly.installed), at: nightly ? nightly.scheduled || null : null } : null,
     },
   ];
 }
@@ -242,7 +275,7 @@ function nextAction(findings, steps) {
     return { kind: 'fix', view: 'findings', count: confirmed,
       title: confirmed === 1 ? 'Fix 1 confirmed problem' : 'Fix ' + confirmed + ' confirmed problems' };
   }
-  const step = steps.find((s) => s.state === 'todo');
+  const step = steps.find((s) => s.state === 'todo' && !s.optional);
   if (step) return { kind: 'step', step: step.id, title: step.title };
   if (toVerify) {
     return { kind: 'verify', view: 'findings', count: toVerify,
@@ -261,8 +294,8 @@ function nightlyLine(nightly) {
   if (!nightly) return null;
   const day = (iso) => String(iso || '').slice(0, 16).replace('T', ' ');
   const read = ' (as of ' + day(nightly.readAt) + ')';
-  if (!nightly.installed) return 'Nightly run in your database: not set up. npx kryptheon-night install sets it up.' + read;
-  const idle = nightly.active ? '' : ' Nothing is scheduled, so it is not running - npx kryptheon-night install sets it up again.';
+  if (!nightly.installed) return 'Nightly run in your database: not set up. Press "Set up nightly check" in Start here.' + read;
+  const idle = nightly.active ? '' : ' Nothing is scheduled, so it is not running - press "Set it up again" in Start here.';
   if (!nightly.ranAt) return 'Nightly run in your database: set up, and it has not run yet.' + idle + read;
   const when = 'Nightly run in your database, ' + day(nightly.ranAt) + ': ';
   if (nightly.stopped) return when + 'it could not check - ' + nightly.stopped + idle + read;
@@ -431,6 +464,7 @@ function buildState(root, env) {
     recordings: recordings,
     lastRunAt: lastRun ? lastRun.runAt : null,
     nightAt: [night ? nightWhen : null, nightly && nightly.ranAt].filter(Boolean).sort().pop() || null,
+    nightly: nightly,
   });
 
   // Every look Kryptheon took - by `verify`, or by the dashboard's own watch -
@@ -467,6 +501,167 @@ function buildState(root, env) {
   };
 }
 
+/* --------------------------------------------------------------------------
+   Jobs: what the page starts, one at a time, with its progress and its end.
+-------------------------------------------------------------------------- */
+
+// What each run is called on the page, and the command that does the same in
+// a terminal - shown under every button, for when the page cannot be used.
+const RUN_TITLE = { frontend: 'Reading your code', regression: 'Replaying your recordings' };
+const RUN_COMMAND = { frontend: 'npx kryptheon code', regression: 'npx kryptheon check' };
+const DB_ACTIONS = {
+  scan: { title: 'Checking your database', command: 'npx kryptheon-night' },
+  install: { title: 'Setting up the nightly check', command: 'npx kryptheon-night install' },
+  night: { title: 'Reading last night\'s result', command: 'npx kryptheon-night night' },
+  uninstall: { title: 'Removing the nightly check', command: 'npx kryptheon-night uninstall' },
+  recheck: { title: 'Re-checking in your database', command: 'npx kryptheon-night' },
+};
+
+/**
+ * What a fresh database check says about one database finding. Fixed only
+ * when the check ran, the finding is gone, and nothing about its table went
+ * untested - a table that could not be tested loses its findings too, and
+ * that is not a fix. A finding still shown only from the nightly run is the
+ * nightly run's older answer, not this one's.
+ */
+function databaseVerdict(target, before, after, ran, saved) {
+  const tableOf = (where) => String(where || '').split('.')[0];
+  let verdict;
+  let why = '';
+  const untested = ((saved && saved.notChecked) || []).find((n) => tableOf(n.table) === tableOf(target.where));
+  if (!ran || !ran.ok) {
+    verdict = 'could not confirm';
+    why = (ran && ran.why) || 'the database check could not run';
+  } else if (after.some((f) => f.id === target.id && f.from !== 'nightly')) {
+    verdict = 'still open';
+  } else if (untested) {
+    verdict = 'could not confirm';
+    why = 'part of ' + tableOf(target.where) + ' could not be tested this time: ' + untested.why;
+  } else {
+    verdict = 'fixed';
+  }
+  const had = new Set(before.map((f) => f.id));
+  return {
+    id: target.id,
+    at: new Date().toISOString(),
+    check: 'data',
+    where: target.where,
+    headline: target.headline,
+    verdict: verdict,
+    why: why,
+    newProblems: after.filter((f) => !had.has(f.id) && f.check === 'data').map((f) => ({
+      id: f.id, check: f.check, severity: f.severity, status: f.status, where: f.where, headline: f.headline,
+    })),
+  };
+}
+const JOB_LINES = 400;
+
+/**
+ * The address to record, or null. Refused: anything that is not one line,
+ * anything that could be read as an option by the command it is passed to,
+ * and anything with a scheme other than http(s).
+ */
+function appAddress(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text || text.length > 2000 || /[\s\x00-\x1f]/.test(text) || text.startsWith('-')) return null;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return /^https?:\/\/[^/]/i.test(text) ? text : null;
+  return /^[a-z0-9.-]+(:\d{1,5})?(\/\S*)?$/i.test(text) ? text : null;
+}
+
+/** The connection string as given, or null when there is none or it is absurd. */
+function connectionFrom(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return text && text.length <= 4000 ? text : null;
+}
+
+/**
+ * Every form in which a connection string could leak back out: the whole
+ * string, without the quotes it may have been pasted with, and its password
+ * both as typed and decoded. Longest first, so a password inside the whole
+ * string is never left half-hidden.
+ */
+function secretsOf(connection) {
+  const raw = String(connection || '').trim();
+  if (!raw) return [];
+  const found = [raw, raw.replace(/^["']|["']$/g, '')];
+  try {
+    const password = new URL(found[1]).password;
+    if (password) {
+      found.push(password);
+      try { found.push(decodeURIComponent(password)); } catch (err) { /* kept as typed */ }
+    }
+  } catch (err) {
+    /* not a URL: the string itself is still hidden */
+  }
+  return Array.from(new Set(found.filter((s) => s.length >= 4))).sort((a, b) => b.length - a.length);
+}
+
+function hideSecrets(text, secrets) {
+  let out = String(text);
+  for (const s of secrets || []) out = out.split(s).join('[hidden]');
+  return out;
+}
+
+/** The same, through every string in a value. */
+function hideSecretsIn(value, secrets) {
+  if (!secrets || !secrets.length) return value;
+  if (typeof value === 'string') return hideSecrets(value, secrets);
+  if (Array.isArray(value)) return value.map((v) => hideSecretsIn(v, secrets));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = hideSecretsIn(value[k], secrets);
+    return out;
+  }
+  return value;
+}
+
+/**
+ * The one job that may run, and the last one that did. Its lines are what the
+ * work said as it went, scrubbed of any secret it was given before they are
+ * kept; when it ends, the secrets are let go.
+ */
+function createJobs() {
+  let current = null;
+  let count = 0;
+  const view = (job) => job && {
+    id: job.id, kind: job.kind, title: job.title, command: job.command,
+    startedAt: job.startedAt, endedAt: job.endedAt, running: job.running,
+    lines: job.lines.slice(), result: job.result,
+  };
+  return {
+    get: () => view(current),
+    busy: () => Boolean(current && current.running),
+    start(kind, title, command, work, givenSecrets) {
+      if (current && current.running) return null;
+      let secrets = givenSecrets || [];
+      const job = {
+        id: ++count, kind: kind, title: title, command: command || '',
+        startedAt: new Date().toISOString(), endedAt: null, running: true, lines: [], result: null,
+      };
+      current = job;
+      const say = (text) => {
+        if (!job.running) return;
+        // Colour codes are for terminals; on the page they are noise.
+        const clean = hideSecrets(String(text == null ? '' : text), secrets).replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+        for (const line of clean.split(/\r?\n/)) job.lines.push(line.slice(0, 500));
+        if (job.lines.length > JOB_LINES) job.lines.splice(0, job.lines.length - JOB_LINES);
+      };
+      const finish = (result) => {
+        job.result = hideSecretsIn(result && typeof result === 'object' ? result : { ok: false, why: 'the run gave no answer' }, secrets);
+        job.running = false;
+        job.endedAt = new Date().toISOString();
+        secrets = null;
+      };
+      Promise.resolve()
+        .then(() => work(say))
+        .then(finish, (err) => finish({ ok: false, why: err && err.message ? err.message : String(err) }));
+      return view(job);
+    },
+  };
+}
+
 /**
  * The server. Local only, and closed to other web pages:
  *   - it listens on 127.0.0.1, never on the network;
@@ -481,7 +676,7 @@ function createServer(root, options) {
   const token = crypto.randomBytes(24).toString('hex');
   const page = fs.readFileSync(path.join(__dirname, 'kryptheon-dashboard.html'), 'utf8');
   let port = 0;
-  let running = false;
+  const jobs = createJobs();
 
   const allowedHosts = () => new Set(['127.0.0.1:' + port, 'localhost:' + port]);
   const send = (res, code, type, body) => {
@@ -527,6 +722,9 @@ function createServer(root, options) {
     if (req.method === 'GET' && url.pathname === '/api/state') {
       return json(res, 200, buildState(root, env));
     }
+    if (req.method === 'GET' && url.pathname === '/api/job') {
+      return json(res, 200, { job: jobs.get() });
+    }
     if (req.method === 'POST') {
       if (req.headers['x-kryptheon-token'] !== token) return json(res, 403, { ok: false, why: 'missing or wrong token' });
       let body = '';
@@ -545,16 +743,20 @@ function createServer(root, options) {
           const r = setCheck(store.pathsFor(root, env), String(input.id || ''), input.on);
           return json(res, r.ok ? 200 : 400, r);
         }
+        // Everything below starts a job: it answers at once with the job, and
+        // the page follows it on /api/job. One at a time - two browsers
+        // replaying against one app, or two attacks on one database, would
+        // interfere, and the results would describe neither.
+        const begin = (kind, title, command, work, secrets) => {
+          const job = jobs.start(kind, title, command, work, secrets);
+          return job ? json(res, 202, { ok: true, job: job }) : json(res, 409, { ok: false, why: 'a run is already going', job: jobs.get() });
+        };
         if (url.pathname === '/api/recheck' && typeof opts.recheck === 'function') {
           const id = String(input.id || '');
           if (!/^[0-9a-f]{8}$/.test(id)) return json(res, 400, { ok: false, why: 'not a finding id' });
-          if (!buildState(root, env).findings.some((f) => f.id === id)) return json(res, 404, { ok: false, why: 'no open finding with that id' });
-          if (running) return json(res, 409, { ok: false, why: 'a run is already going' });
-          running = true;
-          return Promise.resolve(opts.recheck(id)).finally(() => { running = false; }).then(
-            (r) => json(res, r && r.verdict ? 200 : 500, Object.assign({ ok: !!(r && r.verdict) }, r || {})),
-            (err) => json(res, 500, { ok: false, why: err.message }),
-          );
+          const open = buildState(root, env).findings.find((f) => f.id === id);
+          if (!open) return json(res, 404, { ok: false, why: 'no open finding with that id' });
+          return begin('recheck', 'Re-checking: ' + open.headline, 'npx kryptheon recheck ' + id, (say) => opts.recheck(id, say));
         }
         if (url.pathname === '/api/run' && typeof opts.run === 'function') {
           const id = String(input.id || '');
@@ -562,13 +764,52 @@ function createServer(root, options) {
           if (!check || !check.runnable || !check.enabled) {
             return json(res, 400, { ok: false, why: (check ? check.label : '"' + id + '"') + ' cannot be run from here' });
           }
-          // One run at a time: two browsers replaying the same flows against
-          // one app would interfere, and the results would describe neither.
-          if (running) return json(res, 409, { ok: false, why: 'a run is already going' });
-          running = true;
-          return Promise.resolve(opts.run(id)).finally(() => { running = false; }).then(
-            (r) => json(res, r && r.ok ? 200 : 400, r || { ok: false }),
-            (err) => json(res, 500, { ok: false, why: err.message }),
+          return begin('run', RUN_TITLE[id] || check.label, RUN_COMMAND[id] || '', (say) => opts.run(id, say));
+        }
+        if (url.pathname === '/api/record' && typeof opts.record === 'function') {
+          const address = appAddress(input.url);
+          if (!address) return json(res, 400, { ok: false, why: 'that is not a web address - it should look like http://localhost:3000' });
+          return begin('record', 'Recording ' + address, 'npx kryptheon record ' + address, (say) => opts.record(address, say));
+        }
+        if (url.pathname === '/api/db' && typeof opts.db === 'function') {
+          const action = String(input.action || '');
+          if (!DB_ACTIONS[action]) return json(res, 400, { ok: false, why: 'no database action called "' + action + '"' });
+          const connection = connectionFrom(input.connection);
+          if (!connection) return json(res, 400, { ok: false, why: 'paste your connection string first' });
+          if (action === 'recheck') {
+            // One database finding, re-checked: the check runs again and that
+            // finding is judged, the way `npx kryptheon recheck` judges the rest.
+            const id = String(input.id || '');
+            if (!/^[0-9a-f]{8}$/.test(id)) return json(res, 400, { ok: false, why: 'not a finding id' });
+            const target = buildState(root, env).findings.find((f) => f.id === id && f.check === 'data');
+            if (!target) return json(res, 404, { ok: false, why: 'no open database finding with that id' });
+            return begin('db', 'Re-checking: ' + target.headline, DB_ACTIONS.recheck.command, (say) => {
+              const before = buildState(root, env).findings;
+              return Promise.resolve(opts.db('scan', connection, say)).then((ran) => {
+                const attempt = databaseVerdict(target, before, buildState(root, env).findings, ran, readJson(store.pathsFor(root, env).nightLast));
+                try {
+                  fs.appendFileSync(store.pathsFor(root, env).fixes, JSON.stringify(attempt) + '\n', 'utf8');
+                } catch (err) {
+                  attempt.saveError = err.message;
+                }
+                return Object.assign({ ok: true, summary: attempt.verdict }, attempt);
+              });
+            }, secretsOf(connection));
+          }
+          // Handed to the job and nowhere else. The job's lines and result are
+          // scrubbed of it, and it is dropped the moment the job ends.
+          return begin('db', DB_ACTIONS[action].title, DB_ACTIONS[action].command,
+            (say) => opts.db(action, connection, say), secretsOf(connection));
+        }
+        if (url.pathname === '/api/db/words' && typeof opts.words === 'function') {
+          // What kryptheon-night itself would say about this string - its help,
+          // its consent screens, its warnings - asked of it without connecting.
+          const connection = input.connection == null || input.connection === '' ? '' : connectionFrom(input.connection);
+          if (connection === null) return json(res, 400, { ok: false, why: 'that connection string is too long' });
+          const secrets = secretsOf(connection);
+          return Promise.resolve(opts.words(connection)).then(
+            (words) => json(res, 200, hideSecretsIn({ ok: true, words: words }, secrets)),
+            (err) => json(res, 500, hideSecretsIn({ ok: false, why: err.message }, secrets)),
           );
         }
         return json(res, 404, { ok: false, why: 'no such action' });
@@ -600,6 +841,13 @@ module.exports = {
   CHECKS: CHECKS,
   buildState: buildState,
   flowPrompt: flowPrompt,
+  appAddress: appAddress,
+  secretsOf: secretsOf,
+  hideSecrets: hideSecrets,
+  hideSecretsIn: hideSecretsIn,
+  createJobs: createJobs,
+  DB_ACTIONS: DB_ACTIONS,
+  databaseVerdict: databaseVerdict,
   startSteps: startSteps,
   nextAction: nextAction,
   readConfig: readConfig,

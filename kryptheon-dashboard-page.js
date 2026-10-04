@@ -117,6 +117,106 @@
     return b;
   }
 
+  /**
+   * A button with the terminal command that does the same thing underneath it,
+   * small - for when the page cannot be used. Only ever this page's own fixed
+   * commands, or one with an address the person typed, set as text.
+   */
+  function withCommand(btn, command) {
+    var wrap = el('div', 'act');
+    wrap.appendChild(btn);
+    if (command) wrap.appendChild(el('div', 'fallback', 'or in a terminal:  ' + command));
+    return wrap;
+  }
+  function whenTag(when, more) {
+    return el('span', 'tag when', when + (more ? ' - ' + more : ''));
+  }
+
+  // Made once and moved, never rebuilt: the page re-renders every few seconds,
+  // and a rebuilt box would lose what is being typed into it. The connection
+  // string lives only in this one box - it is never put anywhere else on the
+  // page, never saved, and gone when the page is closed or reloaded.
+  var recordInput = el('input', 'field');
+  recordInput.type = 'url';
+  recordInput.placeholder = 'http://localhost:3000';
+  recordInput.setAttribute('aria-label', 'Your app address');
+  recordInput.spellcheck = false;
+  var dbInput = el('input', 'field');
+  dbInput.type = 'password';
+  dbInput.placeholder = 'postgresql://postgres.<project>:<password>@...pooler.supabase.com:5432/postgres';
+  dbInput.setAttribute('aria-label', 'Your database connection string');
+  dbInput.autocomplete = 'off';
+  dbInput.spellcheck = false;
+  dbInput.addEventListener('input', function () { if (pending) { pending = null; renderSteps(); } });
+
+  /* ------------------------------------ jobs ------------------------------------ */
+
+  // The one thing running, as the server tells it. Followed until it ends; its
+  // lines are what the command printed, already scrubbed of any secret.
+  var job = null;
+  var lastRecheck = null;
+
+  function renderJob() {
+    var box = byId('job');
+    clear(box);
+    if (!job) { box.hidden = true; return; }
+    box.hidden = false;
+    box.className = 'job' + (job.running ? ' on' : job.result && job.result.ok ? ' ok' : ' bad');
+    var head = el('div', 'job-head');
+    if (job.running) head.appendChild(el('span', 'spin'));
+    head.appendChild(el('b', null, job.title));
+    head.appendChild(el('span', 'tag ' + (job.running ? 'sun' : job.result && job.result.ok ? 'leaf' : 'ember'),
+      job.running ? 'running' : job.result && job.result.ok ? 'finished' : 'did not finish'));
+    if (!job.running) {
+      var close = el('button', 'job-close', 'Hide');
+      close.type = 'button';
+      close.addEventListener('click', function () { job = null; renderJob(); });
+      head.appendChild(close);
+    }
+    box.appendChild(head);
+    var lines = el('pre', 'job-lines', (job.lines || []).filter(function (l, i, all) { return l || (i && all[i - 1]); }).slice(-60).join('\n') || 'Starting...');
+    box.appendChild(lines);
+    if (!job.running && job.result) {
+      var r = job.result;
+      box.appendChild(el('div', 'job-result', r.ok ? 'Result: ' + (r.summary || 'done') : 'It did not finish: ' + (r.why || 'see the lines above')));
+    }
+    if (job.command) box.appendChild(el('div', 'fallback', 'The same in a terminal:  ' + job.command));
+    lines.scrollTop = lines.scrollHeight;
+  }
+
+  function getJob() {
+    return fetch('/api/job', { cache: 'no-store' }).then(function (res) { return res.json(); }).then(function (d) { return d.job; });
+  }
+
+  /** Starts a job and follows it to its end. Resolves with the finished job. */
+  function runJob(path, body) {
+    if (busy) { toast('Something is already running - wait for it to finish.'); return Promise.reject(new Error('busy')); }
+    setBusy(true);
+    return post(path, body).then(function (started) {
+      job = started.job;
+      renderJob();
+      return follow();
+    }).then(function (done) {
+      setBusy(false);
+      return load().then(function () { return done; });
+    }, function (err) {
+      setBusy(false);
+      if (err.message !== 'busy') toast('Could not start: ' + err.message);
+      throw err;
+    });
+  }
+  function follow() {
+    return new Promise(function (resolve) {
+      (function tick() {
+        getJob().then(function (now) {
+          if (now) { job = now; renderJob(); }
+          if (now && now.running) setTimeout(tick, 700);
+          else resolve(now);
+        }, function () { setTimeout(tick, 1500); });
+      })();
+    });
+  }
+
   var CHECK_NAME = { regression: 'Recorded flows', frontend: 'Frontend code', data: 'Database' };
   var CHECK_TONE = { regression: 'sun', frontend: 'amber', data: 'dusk' };
 
@@ -255,28 +355,197 @@
       var head = el('div', 'step-head');
       head.appendChild(el('div', 'step-title', s.title));
       head.appendChild(el('span', 'tag ' + STEP_TONE[s.state], STEP_WORD[s.state] || s.state));
+      if (s.when) head.appendChild(whenTag(s.when, s.whenMore));
       body.appendChild(head);
       body.appendChild(el('div', 'step-why', s.why + (s.at ? '  -  last ' + ago(s.at) : '') + (s.count ? '  -  ' + plural(s.count, 'recording') + ' held' : '')));
-      if (s.action && s.action.kind === 'run') {
-        var run = button('sun sm', 'play', s.action.label, function () { runChecks([s.action.check], run); });
+      var a = s.action;
+      if (a && a.kind === 'run') {
+        var run = button('sun sm', 'play', a.label, function () { runChecks([a.check], run); });
         run.setAttribute('data-action', 'run');
         run.disabled = busy;
-        body.appendChild(run);
-      } else if (s.action && s.action.kind === 'command') {
-        var cmd = el('div', 'cmd');
-        cmd.appendChild(icon('terminal', 15));
-        cmd.appendChild(el('code', null, s.action.command));
-        var cp = el('button', 'cmd-copy');
-        cp.type = 'button';
-        cp.title = 'Copy';
-        cp.appendChild(icon('copy', 14));
-        cp.addEventListener('click', function () { copy(s.action.command, 'Command copied - run it in your terminal'); });
-        cmd.appendChild(cp);
-        body.appendChild(cmd);
+        body.appendChild(withCommand(run, a.command));
+      } else if (a && a.kind === 'record') {
+        body.appendChild(recordControls(a));
+      } else if (a && a.kind === 'connect') {
+        body.appendChild(connectControls());
+      } else if (a && a.kind === 'db') {
+        body.appendChild(databaseControls(a));
+      } else if (a && a.kind === 'nightly') {
+        body.appendChild(nightlyControls(a));
       }
       row.appendChild(body);
       box.appendChild(row);
     });
+  }
+
+  /* ------------------------- record, database, nightly ------------------------- */
+
+  function recordControls(a) {
+    var wrap = el('div', 'controls');
+    var line = el('div', 'field-row');
+    line.appendChild(recordInput);
+    var go = button('sun sm', 'film', a.label, function () {
+      var address = recordInput.value.trim();
+      if (!address) { toast('Put your app\'s address in the box first - for example http://localhost:3000'); recordInput.focus(); return; }
+      runJob('/api/record', { url: address }).then(function (done) {
+        var r = done && done.result;
+        toast(r && r.ok ? 'Saved: ' + (r.recordings || []).join(', ') : 'Nothing was saved' + (r && r.why ? ' - ' + r.why : ''));
+      }, function () {});
+    });
+    go.setAttribute('data-action', 'record');
+    go.disabled = busy;
+    line.appendChild(go);
+    wrap.appendChild(line);
+    wrap.appendChild(el('div', 'fallback', 'or in a terminal:  ' + a.command));
+    return wrap;
+  }
+
+  // What kryptheon-night itself says - its help, consent screens and warnings -
+  // asked once for the help and again, with the string, before every run.
+  var nightWords = null;
+  var pending = null;
+
+  function loadHelp() {
+    if (nightWords || loadHelp.asked) return;
+    loadHelp.asked = true;
+    post('/api/db/words', {}).then(function (d) { nightWords = d.words; renderSteps(); }, function () { loadHelp.asked = false; });
+  }
+
+  function linesBox(cls, lines) {
+    return el('pre', cls, (lines || []).join('\n'));
+  }
+
+  function connectControls() {
+    var wrap = el('div', 'controls');
+    wrap.appendChild(dbInput);
+    wrap.appendChild(el('div', 'field-note', 'Kept only in this box. It goes to this dashboard on your machine, and to kryptheon-night for one run - never saved, never shown again.'));
+    loadHelp();
+    wrap.appendChild(nightWords ? linesBox('help', nightWords.help) : el('div', 'field-note', 'Loading the steps for finding it...'));
+    return wrap;
+  }
+
+  /**
+   * Asks kryptheon-night what it makes of the string, then shows its own
+   * screen for this action - warnings first, then what it will do - and waits
+   * for a yes. A string it cannot use stops here, before any run.
+   */
+  function prepare(action, step, finding) {
+    var connection = dbInput.value.trim();
+    if (!connection) {
+      toast('Paste your connection string in "Connect your database" first.');
+      go('dashboard');
+      setTimeout(function () { dbInput.focus(); dbInput.scrollIntoView({ block: 'center' }); }, 50);
+      return;
+    }
+    if (busy) return;
+    post('/api/db/words', { connection: connection }).then(function (d) {
+      pending = { action: action, step: step, words: d.words, finding: finding || null };
+      renderSteps();
+      renderFindings();
+    }, function (err) { toast('Could not ask kryptheon-night: ' + err.message); });
+  }
+
+  function consentBox(yesLabel, lines) {
+    var p = pending;
+    var box = el('div', 'consent');
+    if (p.words.unusable) {
+      box.appendChild(el('div', 'd-step', 'THIS STRING WILL NOT WORK'));
+      box.appendChild(linesBox('warn', p.words.unusable));
+      box.appendChild(button('sm', null, 'Change it', function () { pending = null; renderSteps(); dbInput.focus(); }));
+      return box;
+    }
+    if (p.words.warning) {
+      box.appendChild(el('div', 'd-step', 'BEFORE YOU GO ON'));
+      box.appendChild(linesBox('warn', p.words.warning));
+    }
+    if (lines) box.appendChild(linesBox('help', lines));
+    var row = el('div', 'd-actions');
+    var yes = button('sun sm', 'check', yesLabel, function () {
+      var connection = dbInput.value.trim();
+      var action = p.action;
+      var finding = p.finding;
+      pending = null;
+      renderSteps();
+      renderFindings();
+      runJob('/api/db', { action: action, connection: connection, id: finding ? finding.id : undefined }).then(function (done) {
+        var r = (done && done.result) || {};
+        if (finding) return heard(finding, r);
+        toast(r.ok ? 'Finished: ' + (r.summary || 'done') : 'It could not finish' + (r.why ? ' - ' + r.why : ''));
+      }, function () {});
+    });
+    yes.setAttribute('data-action', 'db');
+    yes.disabled = busy;
+    row.appendChild(yes);
+    row.appendChild(button('sm', null, 'Cancel', function () { pending = null; renderSteps(); renderFindings(); }));
+    box.appendChild(row);
+    return box;
+  }
+
+  function databaseControls(a) {
+    var wrap = el('div', 'controls');
+    if (pending && pending.step === 'data') {
+      wrap.appendChild(consentBox('Yes, check it', pending.words.consent));
+      return wrap;
+    }
+    var go = button('sun sm', 'play', a.label, function () { prepare('scan', 'data'); });
+    go.setAttribute('data-action', 'db');
+    go.disabled = busy;
+    wrap.appendChild(withCommand(go, a.command));
+    return wrap;
+  }
+
+  /** The nightly time, from the job's own schedule, in the person's own time. */
+  function nightlyTime(cron) {
+    var m = /^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$/.exec(String(cron || '').trim());
+    if (!m) return null;
+    var now = new Date();
+    var at = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), Number(m[2]), Number(m[1])));
+    var utc = String(m[2]).padStart(2, '0') + ':' + String(m[1]).padStart(2, '0') + ' UTC';
+    return utc + ' - ' + at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' your time';
+  }
+
+  function nightlyControls(a) {
+    var wrap = el('div', 'controls');
+    var time = nightlyTime(a.at || (nightWords && nightWords.nightlyAt));
+    wrap.appendChild(el('div', 'field-note', (a.installed ? 'Set up. ' : 'Not set up yet. ') +
+      'It runs every night' + (time ? ' at ' + time : '') + '.'));
+    if (pending && pending.step === 'nightly') {
+      wrap.appendChild(pending.action === 'install'
+        ? consentBox('Yes, set it up', pending.words.installConsent)
+        : consentBox('Yes, remove it', ['This removes the nightly job, the "kryptheon" schema in your database, and any',
+          'extension kryptheon-night had to add - and leaves alone anything that was there before.']));
+      return wrap;
+    }
+    var row = el('div', 'act-row');
+    var setUp = button(a.installed ? 'sm' : 'sun sm', 'sun', a.installed ? 'Set it up again' : 'Set up nightly check', function () { prepare('install', 'nightly'); });
+    setUp.setAttribute('data-action', 'db');
+    setUp.disabled = busy;
+    var setWrap = withCommand(setUp, 'npx kryptheon-night install');
+    setWrap.insertBefore(whenTag('one time'), setWrap.firstChild);
+    row.appendChild(setWrap);
+    var see = button('sm', 'eye', 'See last night\'s result', function () {
+      var connection = dbInput.value.trim();
+      if (!connection) { toast('Paste your connection string in "Connect your database" first.'); dbInput.focus(); return; }
+      runJob('/api/db', { action: 'night', connection: connection }).then(function (done) {
+        var r = done && done.result;
+        toast(r && r.ok ? 'Read back - see the lines above and Findings' : 'Nothing to read back' + (r && r.why ? ' - ' + r.why : ''));
+      }, function () {});
+    });
+    see.setAttribute('data-action', 'db');
+    see.disabled = busy;
+    var seeWrap = withCommand(see, 'npx kryptheon-night night');
+    seeWrap.insertBefore(whenTag('any morning'), seeWrap.firstChild);
+    row.appendChild(seeWrap);
+    if (a.installed) {
+      var remove = button('sm', null, 'Remove nightly check', function () { prepare('uninstall', 'nightly'); });
+      remove.setAttribute('data-action', 'db');
+      remove.disabled = busy;
+      var rmWrap = withCommand(remove, 'npx kryptheon-night uninstall');
+      rmWrap.insertBefore(whenTag('one time'), rmWrap.firstChild);
+      row.appendChild(rmWrap);
+    }
+    wrap.appendChild(row);
+    return wrap;
   }
 
   /* ------------------------------ connect your AI tool ------------------------------ */
@@ -418,10 +687,10 @@
         copy(f.fixPrompt, 'Fix prompt copied - paste it into your AI tool');
       }));
     }
-    var re = button('sun sm', 'refresh', 'Re-check', function (e) { e.stopPropagation(); recheck(f, re); });
+    var re = button('sun sm', 'refresh', 'Re-check', function (e) { e.stopPropagation(); recheck(f); });
     re.setAttribute('data-action', 'recheck');
     re.disabled = busy;
-    actions.appendChild(re);
+    actions.appendChild(withCommand(re, f.check === 'data' ? 'npx kryptheon-night' : 'npx kryptheon recheck ' + f.id));
     box.appendChild(actions);
     if (f.attempts && f.attempts.length) {
       var list = el('div', 'attempts');
@@ -445,10 +714,21 @@
       return true;
     });
     byId('findingBadge').textContent = shown.length + (shown.length !== state.findings.length ? ' of ' + state.findings.length : '');
+    // A finding the last re-check closed is no longer in the list, so its
+    // answer is said here instead - with what the fix newly broke, if anything.
+    var open = state.findings.some(function (f) { return lastRecheck && f.id === lastRecheck.id; });
+    if (lastRecheck && !open) {
+      var gone = el('div', 'rechecked');
+      gone.appendChild(el('span', 'tag ' + (VERDICT_TONE[lastRecheck.verdict] || ''), VERDICT_WORDS[lastRecheck.verdict] || lastRecheck.verdict));
+      gone.appendChild(el('span', null, 'Just re-checked: ' + lastRecheck.headline + (lastRecheck.why ? ' - ' + lastRecheck.why : '')));
+      if (lastRecheck.newProblems.length) gone.appendChild(el('span', 'tag ember', plural(lastRecheck.newProblems.length, 'problem') + ' newly broken - marked below'));
+      body.appendChild(gone);
+    }
     if (!shown.length) {
       body.appendChild(el('p', 'empty', state.findings.length ? 'Nothing matches.' : 'Nothing found by the checks that are on and have run. That is not the same as nothing wrong - see which checks are not built yet.'));
       return;
     }
+    var newlyBroken = (lastRecheck ? lastRecheck.newProblems : []).map(function (p) { return p.id; });
     shown.forEach(function (f) {
       var card = el('div', 'finding ' + (f.status === 'confirmed' ? 'bad' : 'warn'));
       var head = el('button', 'finding-head');
@@ -460,12 +740,32 @@
       meta.appendChild(statusTag(f));
       meta.appendChild(el('span', 'tag ' + (CHECK_TONE[f.check] || ''), CHECK_NAME[f.check] || f.check));
       if (f.from === 'nightly' || f.from === 'both') meta.appendChild(el('span', 'tag', f.from === 'both' ? 'also nightly' : 'nightly'));
+      // The latest re-check, on the finding itself: still open, or newly
+      // broken by a fix for something else.
+      var latest = (f.attempts || [])[f.attempts ? f.attempts.length - 1 : 0];
+      if (latest) meta.appendChild(el('span', 'tag ' + (VERDICT_TONE[latest.verdict] || ''), (VERDICT_WORDS[latest.verdict] || latest.verdict) + ' ' + ago(latest.at)));
+      if (newlyBroken.indexOf(f.id) !== -1) meta.appendChild(el('span', 'tag ember', 'NEWLY BROKEN'));
       meta.appendChild(el('span', 'f-where', f.where));
       left.appendChild(meta);
       head.appendChild(left);
       head.appendChild(icon(openRow === f.id ? 'change' : 'arrow', 18));
       head.addEventListener('click', function () { openRow = openRow === f.id ? null : f.id; renderFindings(); });
       card.appendChild(head);
+      if (pending && pending.step === 'finding' && pending.finding && pending.finding.id === f.id) {
+        var asking = el('div', 'controls f-quick');
+        asking.appendChild(consentBox('Yes, check it again', pending.words.consent));
+        card.appendChild(asking);
+      } else if (openRow !== f.id) {
+        // The two things to do with a finding, without opening it first.
+        var quick = el('div', 'f-quick');
+        if (f.fixPrompt) quick.appendChild(button('sm', 'copy', 'Copy fix prompt', function () { copy(f.fixPrompt, 'Fix prompt copied - paste it into your AI tool'); }));
+        var qre = button('sm', 'refresh', 'Re-check', function () { recheck(f); });
+        qre.setAttribute('data-action', 'recheck');
+        qre.disabled = busy;
+        quick.appendChild(withCommand(qre, f.check === 'data' ? 'npx kryptheon-night' : 'npx kryptheon recheck ' + f.id));
+        quick.appendChild(whenTag('after every change'));
+        card.appendChild(quick);
+      }
       if (openRow === f.id) card.appendChild(detailBox(f));
       body.appendChild(card);
     });
@@ -625,29 +925,39 @@
 
   /* ---------------------------------- actions ---------------------------------- */
 
-  function recheck(f, btn) {
-    if (busy) return;
-    setBusy(true);
-    clear(btn);
-    btn.appendChild(el('span', 'spin'));
-    btn.appendChild(el('span', null, f.check === 'regression' ? 'Replaying...' : 'Re-checking...'));
-    post('/api/recheck', { id: f.id }).then(function (r) {
-      var words = { fixed: 'FIXED', 'still open': 'STILL OPEN', 'gone with its file': 'GONE WITH ITS FILE - not the same as fixed', 'could not confirm': 'COULD NOT CONFIRM' };
-      toast((words[r.verdict] || r.verdict) + (r.why ? ' - ' + r.why : '') + (r.newProblems && r.newProblems.length ? ' - ' + plural(r.newProblems.length, 'new problem') : ''));
-    }).catch(function (err) { toast('Re-check failed: ' + err.message); }).then(function () { setBusy(false); return load(); });
+  var VERDICT_WORDS = { fixed: 'FIXED', 'still open': 'STILL OPEN', 'gone with its file': 'GONE WITH ITS FILE - not the same as fixed', 'could not confirm': 'COULD NOT CONFIRM' };
+
+  /**
+   * Re-checks one finding. Its answer stays on the page: on the finding while
+   * it is still open, as a line at the top of Findings once it is fixed and
+   * gone from the list, and on every problem the fix newly broke.
+   */
+  function recheck(f) {
+    // A database finding is re-checked in the database: the same check, the
+    // same yes first, then this one finding judged.
+    if (f.check === 'data') { prepare('recheck', 'finding', f); return; }
+    runJob('/api/recheck', { id: f.id }).then(function (done) { heard(f, (done && done.result) || {}); }, function () {});
+  }
+  function heard(f, r) {
+    if (!r.verdict) { toast('The re-check gave no verdict' + (r.why ? ' - ' + r.why : '')); return; }
+    lastRecheck = { id: f.id, headline: f.headline, verdict: r.verdict, why: r.why || '', newProblems: r.newProblems || [] };
+    renderFindings();
+    toast((VERDICT_WORDS[r.verdict] || r.verdict) + (r.why ? ' - ' + r.why : '') + (lastRecheck.newProblems.length ? ' - ' + plural(lastRecheck.newProblems.length, 'problem') + ' newly broken' : ''));
   }
 
-  function runChecks(ids, btn) {
+  /** Runs each check in turn, each as its own job, and says when all are done. */
+  function runChecks(ids) {
     if (busy || !ids.length) return;
-    setBusy(true);
-    clear(btn);
-    btn.appendChild(el('span', 'spin'));
-    btn.appendChild(el('span', null, 'Running...'));
+    var failed = [];
     ids.reduce(function (chain, id) {
-      return chain.then(function () { return post('/api/run', { id: id }); });
+      return chain.then(function () {
+        return runJob('/api/run', { id: id }).then(function (done) {
+          if (!done || !done.result || !done.result.ok) failed.push(CHECK_NAME[id] || id);
+        });
+      });
     }, Promise.resolve()).then(function () {
-      toast('Finished: ' + ids.map(function (id) { return CHECK_NAME[id] || id; }).join(', '));
-    }).catch(function (err) { toast('Run failed: ' + err.message); }).then(function () { setBusy(false); return load(); });
+      toast(failed.length ? 'Did not finish: ' + failed.join(', ') : 'Finished: ' + ids.map(function (id) { return CHECK_NAME[id] || id; }).join(', '));
+    }, function () {});
   }
 
   function setCheck(id, on, input) {
@@ -696,7 +1006,21 @@
 
   renderAI();
   showView();
-  load();
-  // Not while something runs, and not while a finding is open being read.
-  setInterval(function () { if (!busy && !openRow) load(); }, 5000);
+  load().then(function () {
+    // A run started before this page was opened - or before a reload - is
+    // still followed to its end, and nothing else starts meanwhile.
+    return getJob().then(function (now) {
+      if (!now || !now.running) return;
+      job = now;
+      setBusy(true);
+      renderJob();
+      return follow().then(function () { setBusy(false); return load(); });
+    });
+  }).catch(function () {});
+  // Not while something runs, not while a finding is open being read, not
+  // while a yes is being asked for, and not while someone is typing.
+  setInterval(function () {
+    var typing = document.activeElement === dbInput || document.activeElement === recordInput;
+    if (!busy && !openRow && !pending && !typing) load();
+  }, 5000);
 })();

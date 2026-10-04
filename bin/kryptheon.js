@@ -80,6 +80,16 @@ function usage() {
   console.log('');
   console.log('  kryptheon - record and check your app');
   console.log('');
+  console.log('  The one command to remember:');
+  console.log('');
+  console.log('    npx kryptheon@latest dashboard');
+  console.log('');
+  console.log('  It opens a page in your browser, and everything else is a button there:');
+  console.log('  read your code, record and replay your flows, check your database, set up');
+  console.log('  the nightly check, and re-check a fix.');
+  console.log('');
+  console.log('  The same, for scripts and AI tools:');
+  console.log('');
   console.log('  npx kryptheon record <url>   open your app and record what you do as a test');
   console.log('  npx kryptheon check          run every recorded test and report in plain language');
   console.log('  npx kryptheon accept <name>  agree that one test\'s new result is the correct one');
@@ -88,7 +98,7 @@ function usage() {
   console.log('  npx kryptheon verify         after a change: what changed, what broke, what got fixed');
   console.log('  npx kryptheon recheck [id]   prove a fix: run the check again, and say FIXED or not');
   console.log('  npx kryptheon code           read your frontend code for text inserted as HTML');
-  console.log('  npx kryptheon dashboard      open this project\'s dashboard (also: npx kryptheon, in a terminal)');
+  console.log('  npx kryptheon dashboard      the page above (also: npx kryptheon, in a terminal)');
   console.log('');
   console.log('  add --quiet to check for one line when everything passes');
   console.log('  npx kryptheon --version      print the version you have installed');
@@ -2313,27 +2323,192 @@ function recheckCommand(id) {
 
 const DASHBOARD_PORT = 4789;
 
-function runFromDashboard(id, opened) {
+/**
+ * Runs a command and hands every line it prints to `say`, as it prints it -
+ * so the page can show progress instead of a spinner. Nothing is read from
+ * the keyboard: a command started from the page has nobody at one.
+ */
+function spawnLines(file, args, options, say) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(file, args, Object.assign({ cwd: USER_DIR, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }, options || {}));
+    } catch (err) {
+      say('Could not start it: ' + err.message);
+      resolve({ code: null, why: err.message });
+      return;
+    }
+    const pending = { out: '', err: '' };
+    const feed = (which) => (chunk) => {
+      pending[which] += chunk.toString();
+      const parts = pending[which].split(/\r?\n/);
+      pending[which] = parts.pop();
+      for (const line of parts) say(line);
+    };
+    child.stdout.on('data', feed('out'));
+    child.stderr.on('data', feed('err'));
+    child.on('error', (err) => {
+      say('Could not start it: ' + err.message);
+      resolve({ code: null, why: err.message });
+    });
+    child.on('close', (code) => {
+      if (pending.out) say(pending.out);
+      if (pending.err) say(pending.err);
+      resolve({ code: code });
+    });
+  });
+}
+
+/** This same command, as a child, with these arguments. */
+function kryptheonChild(args, say) {
+  return spawnLines(process.execPath, [path.join(PACKAGE_DIR, 'bin', 'kryptheon.js')].concat(args), {}, say);
+}
+
+/**
+ * How kryptheon-night is started from the page: the newest one from npm, the
+ * same as `npx kryptheon-night` in a terminal. KRYPTHEON_NIGHT_BIN points at
+ * a copy on disk instead, for the checks. The arguments are only ever this
+ * file's own fixed words - the connection string travels in the environment,
+ * never on a command line, where other programs on the machine could read it.
+ */
+function nightChild(words, env, say) {
+  const own = process.env.KRYPTHEON_NIGHT_BIN;
+  const options = { env: env };
+  if (own) return spawnLines(process.execPath, [own].concat(words), options, say);
+  const npx = 'npx --yes kryptheon-night@latest ' + words.join(' ');
+  if (process.platform === 'win32') {
+    return spawnLines(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', npx], Object.assign({ windowsVerbatimArguments: true }, options), say);
+  }
+  return spawnLines('npx', ['--yes', 'kryptheon-night@latest'].concat(words), options, say);
+}
+
+/** The environment a child is given: this one, never with a connection string of its own. */
+function childEnv(extra) {
+  const env = Object.assign({}, process.env, extra || {});
+  if (!extra || !('KN_DATABASE_URL' in extra)) delete env.KN_DATABASE_URL;
+  return env;
+}
+
+// What each database button asks kryptheon-night to do. `--yes` only where
+// the page has already shown the same consent screen and been told yes.
+const NIGHT_WORDS = {
+  scan: ['--yes'],
+  install: ['install', '--yes'],
+  night: ['night'],
+  uninstall: ['uninstall'],
+};
+
+const NIGHT_SAYS = { 0: 'nothing got through', 1: 'something got through - see Findings', 2: 'it could not check' };
+
+function runFromDashboard(id, opened, say) {
   if (id === 'frontend') {
+    say('Reading the code in ' + USER_DIR + ' ...');
     const result = readCodeAndSave(opened);
-    return result.ran ? { ok: true } : { ok: false, why: result.why };
+    if (!result.ran) {
+      say(result.why);
+      return { ok: false, why: result.why };
+    }
+    const n = (result.findings || []).length;
+    say('Read ' + (result.filesRead || 0) + ((result.filesRead || 0) === 1 ? ' file. ' : ' files. ') + (n ? n + ' thing' + (n === 1 ? '' : 's') + ' to look at.' : 'Nothing found.'));
+    return { ok: true, summary: n ? n + ' thing' + (n === 1 ? '' : 's') + ' to look at' : 'nothing found' };
   }
   if (id === 'regression') {
     // The same command a person types, as a separate process, so the page
     // stays answerable while a browser replays the flows.
-    return new Promise((resolve) => {
-      const child = spawn(process.execPath, [path.join(PACKAGE_DIR, 'bin', 'kryptheon.js'), 'check', '--quiet'], {
-        cwd: USER_DIR,
-        stdio: 'ignore',
-        env: process.env,
-      });
-      child.on('error', (err) => resolve({ ok: false, why: err.message }));
+    return kryptheonChild(['check'], say).then(({ code }) =>
       // A run that found broken flows is a run that finished; its results are
       // in the history the page reads next.
-      child.on('close', (code) => resolve(code === 0 || code === 1 ? { ok: true, exit: code } : { ok: false, why: 'the run stopped with exit ' + code }));
-    });
+      code === 0 ? { ok: true, summary: 'every flow held' }
+        : code === 1 ? { ok: true, summary: 'a flow broke - see Findings' }
+        : { ok: false, why: 'the replay stopped with exit ' + code });
   }
   return { ok: false, why: '"' + id + '" cannot be run from the dashboard' };
+}
+
+/** Re-checks one finding the way `npx kryptheon recheck <id>` does, and reads back its verdict. */
+function recheckFromDashboard(id, opened, say) {
+  // Only a verdict written by this re-check counts: an older one for the
+  // same finding, read after a child that failed early, would be a stale
+  // answer shown as a fresh one.
+  const startedAt = new Date().toISOString();
+  return kryptheonChild(['recheck', id], say).then(() => {
+    let last = null;
+    try {
+      const lines = fs.readFileSync(opened.fixes, 'utf8').split(String.fromCharCode(10)).filter(Boolean);
+      for (let i = lines.length - 1; i >= 0 && !last; i--) {
+        const a = JSON.parse(lines[i]);
+        if (a.id === id && a.at >= startedAt) last = a;
+      }
+    } catch (err) {
+      last = null;
+    }
+    if (!last) return { ok: false, why: 'the re-check did not record a verdict' };
+    return Object.assign({ ok: true, summary: last.verdict }, last);
+  });
+}
+
+/** Records one flow the way `npx kryptheon record <address>` does, and names what it saved. */
+function recordFromDashboard(address, say) {
+  const before = listSpecFiles();
+  say('A browser window opens on ' + address + '. Use your app, then close that window to save.');
+  return kryptheonChild(['record', address], say).then(({ code }) => {
+    const added = listSpecFiles().filter((name) => !before.includes(name));
+    if (!added.length) return { ok: false, exit: code, why: 'no recording was saved' };
+    return { ok: true, exit: code, recordings: added, summary: 'saved ' + added.join(', ') };
+  });
+}
+
+/** One database action, through kryptheon-night, with the string in its environment only. */
+function databaseFromDashboard(action, connection, say) {
+  return nightChild(NIGHT_WORDS[action], childEnv({ KN_DATABASE_URL: connection }), say).then(({ code }) => {
+    if (code === null || code === undefined) return { ok: false, why: 'kryptheon-night could not be started' };
+    if (action === 'scan') return { ok: code !== 2, exit: code, summary: NIGHT_SAYS[code] || 'it ended with exit ' + code };
+    return code === 2 && action !== 'night'
+      ? { ok: false, exit: code, why: 'it could not do that - the lines above say why' }
+      : code === 2 ? { ok: false, exit: code, why: 'nothing to read back - the lines above say why' }
+      : { ok: true, exit: code, summary: 'done' };
+  });
+}
+
+/** What kryptheon-night itself would say - help, consent, warnings - without connecting. */
+function nightWords(connection) {
+  const said = [];
+  return nightChild(['words'], childEnv(connection ? { KN_DATABASE_URL: connection } : {}), (line) => said.push(line))
+    .then(({ code }) => {
+      for (const line of said) {
+        if (!/^\s*\{/.test(line)) continue;
+        try {
+          return JSON.parse(line);
+        } catch (err) {
+          /* not the JSON line */
+        }
+      }
+      throw new Error('kryptheon-night did not answer (exit ' + code + ')');
+    });
+}
+
+/**
+ * Opens the page in the person's own browser. Not when KRYPTHEON_NO_OPEN or
+ * CI is set - a script or a check has nobody to show a page to - and never
+ * fatal: the address is printed either way.
+ */
+function openInBrowser(url) {
+  // KRYPTHEON_BROWSER names the program to open it with instead (a .js file
+  // is run with Node) - for a browser of one's own choosing, and the checks.
+  const chosen = process.env.KRYPTHEON_BROWSER;
+  if (process.env.KRYPTHEON_NO_OPEN || (process.env.CI && !chosen)) return false;
+  const how = chosen ? (/\.[cm]?js$/i.test(chosen) ? [process.execPath, [chosen, url]] : [chosen, [url]])
+    : process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
+    : process.platform === 'darwin' ? ['open', [url]]
+    : ['xdg-open', [url]];
+  try {
+    const child = spawn(how[0], how[1], { stdio: 'ignore', detached: true, windowsHide: true });
+    child.on('error', () => {});
+    child.unref();
+    return true;
+  } catch (err) {
+    return false;
+  }
 }
 
 async function dashboardCommand() {
@@ -2346,34 +2521,11 @@ async function dashboardCommand() {
   if (!opened) return 1;
   const dash = require(path.join(PACKAGE_DIR, 'kryptheon-dashboard.js'));
   const app = dash.createServer(USER_DIR, {
-    run: (id) => runFromDashboard(id, opened),
-    // The same `recheck` a person types, in its own process, so the page stays
-    // answerable while a flow is replayed. Its verdict is read from the store.
-    recheck: (id) => new Promise((resolve) => {
-      // Only a verdict written by this re-check counts: an older one for the
-      // same finding, read after a child that failed early, would be a stale
-      // answer shown as a fresh one.
-      const startedAt = new Date().toISOString();
-      const child = spawn(process.execPath, [path.join(PACKAGE_DIR, 'bin', 'kryptheon.js'), 'recheck', id], {
-        cwd: USER_DIR,
-        stdio: 'ignore',
-        env: process.env,
-      });
-      child.on('error', (err) => resolve({ ok: false, why: err.message }));
-      child.on('close', () => {
-        let last = null;
-        try {
-          const lines = fs.readFileSync(opened.fixes, 'utf8').split(String.fromCharCode(10)).filter(Boolean);
-          for (let i = lines.length - 1; i >= 0 && !last; i--) {
-            const a = JSON.parse(lines[i]);
-            if (a.id === id && a.at >= startedAt) last = a;
-          }
-        } catch (err) {
-          last = null;
-        }
-        resolve(last || { ok: false, why: 'the re-check did not record a verdict' });
-      });
-    }),
+    run: (id, say) => runFromDashboard(id, opened, say),
+    recheck: (id, say) => recheckFromDashboard(id, opened, say),
+    record: (address, say) => recordFromDashboard(address, say),
+    db: (action, connection, say) => databaseFromDashboard(action, connection, say),
+    words: (connection) => nightWords(connection),
   });
   let port;
   try {
@@ -2382,13 +2534,17 @@ async function dashboardCommand() {
     // Taken - by another project's dashboard, most likely. Any free port will do.
     port = await app.listen(0);
   }
+  const address = 'http://127.0.0.1:' + port + '/';
+  const shown = openInBrowser(address);
   console.log('');
   console.log('  Kryptheon dashboard for ' + path.basename(USER_DIR) + ':');
   console.log('');
-  console.log('    http://127.0.0.1:' + port + '/');
+  console.log('    ' + address);
   console.log('');
-  console.log('  Open that address in your browser. It is only reachable from this');
-  console.log('  machine. Press Ctrl+C here to stop it.');
+  console.log(shown ? '  It is opening in your browser. If it does not, open that address.'
+    : '  Open that address in your browser.');
+  console.log('  It is only reachable from this machine. Everything else is a button');
+  console.log('  on that page. Press Ctrl+C here to stop it.');
   console.log('');
 
   // While the page is open, Kryptheon notices changes by itself: once a change

@@ -161,7 +161,7 @@ const stepState = (steps) => steps.map((s) => s.id + ':' + s.state).join(' ');
 check('a new project starts at step 1, and nothing is done that has not run', (() => {
   const p = [];
   const steps = dashboard.startSteps(allOn, { codeAt: null, recordings: 0, lastRunAt: null, nightAt: null });
-  const want = 'frontend:todo record:todo regression:waiting data:todo';
+  const want = 'frontend:todo record:todo regression:waiting connect:todo data:todo nightly:todo';
   if (stepState(steps) !== want) p.push('steps: ' + stepState(steps) + ', wanted ' + want);
   const next = dashboard.nextAction([], steps);
   if (next.kind !== 'step' || next.step !== 'frontend') p.push('next: ' + JSON.stringify(next));
@@ -180,7 +180,13 @@ check('each step is done only once it has run, whatever it found, and the next o
   if (replay.state !== 'todo' || !replay.action || replay.action.check !== 'regression') p.push('recorded but never replayed: ' + JSON.stringify(replay));
   if (dashboard.nextAction([], recorded).step !== 'regression') p.push('next is not replaying');
   const all = dashboard.startSteps(allOn, { codeAt: 'a', recordings: 2, lastRunAt: 'b', nightAt: 'c' });
-  if (stepState(all) !== 'frontend:done record:done regression:done data:done') p.push('all run: ' + stepState(all));
+  if (stepState(all) !== 'frontend:done record:done regression:done connect:done data:done nightly:todo') p.push('all run: ' + stepState(all));
+  // The nightly check is offered, never pressed for: done only once it is set up and scheduled.
+  const nightly = dashboard.startSteps(allOn, { codeAt: 'a', recordings: 2, lastRunAt: 'b', nightAt: 'c', nightly: { installed: true, active: true, ranAt: 'd' } });
+  if (nightly.find((s) => s.id === 'nightly').state !== 'done') p.push('a scheduled nightly check is not done');
+  const idle = dashboard.startSteps(allOn, { codeAt: 'a', recordings: 2, lastRunAt: 'b', nightAt: 'c', nightly: { installed: true, active: false } });
+  if (idle.find((s) => s.id === 'nightly').state !== 'todo') p.push('a nightly check with nothing scheduled is done');
+  if (dashboard.nextAction([], all).kind !== 'quiet') p.push('the optional nightly step is pressed for: ' + JSON.stringify(dashboard.nextAction([], all)));
   const allowed = new Set(['done', 'todo', 'off', 'waiting']);
   for (const s of [].concat(read, recorded, all)) if (!allowed.has(s.state)) p.push(s.id + ' says ' + s.state);
   return p;
@@ -197,6 +203,13 @@ check('a switched-off check is "off" - never done, never asked for next', (() =>
   if (next.kind !== 'quiet') p.push('with the rest done, next is ' + JSON.stringify(next));
   // Every check that can be switched off, never run and never recorded.
   for (const id of ['frontend', 'regression', 'data']) {
+    if (id === 'data') {
+      const steps = dashboard.startSteps(allOn.map((c) => (c.id === 'data' ? { id: 'data', enabled: false } : c)), { codeAt: null, recordings: 1, lastRunAt: null, nightAt: null });
+      for (const sid of ['connect', 'nightly']) {
+        const st = steps.find((x) => x.id === sid);
+        if (st.state !== 'off' || st.action) p.push(sid + ' with the database check off: ' + st.state + ' ' + JSON.stringify(st.action));
+      }
+    }
     const off = allOn.map((c) => (c.id === id ? { id: id, enabled: false } : c));
     const s = dashboard.startSteps(off, { codeAt: null, recordings: 1, lastRunAt: null, nightAt: null }).find((x) => x.id === id);
     if (s.state !== 'off') p.push(id + ' switched off says ' + s.state);
@@ -226,16 +239,25 @@ check('the steps say the two things people get wrong: record while it works, and
   const p = [];
   const steps = dashboard.startSteps(allOn, { codeAt: null, recordings: 0, lastRunAt: null, nightAt: null });
   const rec = steps.find((s) => s.id === 'record');
-  const db = steps.find((s) => s.id === 'data');
+  const db = steps.find((s) => s.id === 'connect');
+  const scan = steps.find((s) => s.id === 'data');
   if (!/Record while your app works/.test(rec.why)) p.push('the record step does not say to record while the app works: ' + rec.why);
-  if (!/Project Settings, Database, Connection string/.test(db.why)) p.push('the database step does not say where the string is: ' + db.why);
-  if (!/test project first/.test(db.why)) p.push('the database step does not advise a test project first');
+  if (!/steps are next to the box/.test(db.why)) p.push('the connect step does not point at the steps for finding the string: ' + db.why);
+  if (!/never saved/.test(db.why)) p.push('the connect step does not say the string is never saved');
+  if (!/test project first/.test(db.why)) p.push('the connect step does not advise a test project first');
+  if (!/waits for your yes/.test(scan.why)) p.push('the database step does not say it waits for a yes');
+  // Every step says how often it is done.
+  const want = { frontend: 'after every change', record: 'one time', regression: 'after every change', connect: 'one time', data: 'after every change', nightly: 'one time' };
+  for (const s of steps) if (s.when !== want[s.id]) p.push(s.id + ' is labelled ' + s.when);
+  if (!/only when that flow changes/.test(rec.whenMore || '')) p.push('the record step does not say when to record again');
+  // And every button the page draws carries the command that does the same.
+  for (const s of steps) if (s.action && ['run', 'record', 'db'].includes(s.action.kind) && !/^npx /.test(s.action.command || '')) p.push(s.id + ' has no terminal command');
   return p;
 })());
 
 check('the page is handed the steps and the next action, built from the store', (() => {
   const p = [];
-  if (!Array.isArray(state.steps) || state.steps.length !== 4) return ['steps: ' + JSON.stringify(state.steps)];
+  if (!Array.isArray(state.steps) || state.steps.length !== 6) return ['steps: ' + JSON.stringify(state.steps.map((s) => s.id))];
   if (state.steps.find((s) => s.id === 'frontend').state !== 'done') p.push('the saved read is not step 1 done');
   if (state.steps.find((s) => s.id === 'regression').state !== 'done') p.push('the saved runs are not step 3 done');
   if (!state.next || state.next.kind !== 'fix') p.push('with a broken recording, next is ' + JSON.stringify(state.next));
@@ -317,6 +339,90 @@ check('switching the database check off hides the nightly findings too', (() => 
   return s.findings.some((x) => x.check === 'data') ? ['a switched-off check still shows nightly findings'] : [];
 })());
 
+// What the page may hand the commands it starts: an address to record that
+// can only be an address, and a connection string that never comes back out.
+check('only a web address is accepted for recording - never an option, never another scheme', (() => {
+  const p = [];
+  for (const good of ['http://localhost:3000', 'https://my-app.lovable.app/login', 'localhost:5173', 'my-app.vercel.app']) {
+    if (dashboard.appAddress(good) !== good) p.push('refused ' + good);
+  }
+  for (const bad of ['', '   ', '--headed', '-o x', 'file:///etc/passwd', 'javascript:alert(1)', 'ftp://x', 'http://a b', 'http://x\nrm', 'x'.repeat(3000), null, 42]) {
+    if (dashboard.appAddress(bad) !== null) p.push('accepted ' + JSON.stringify(bad));
+  }
+  if (dashboard.appAddress('  http://localhost:3000  ') !== 'http://localhost:3000') p.push('spaces around it were not trimmed');
+  return p;
+})());
+
+const SECRET = 'S3cr3t-pass/word';
+const CONN = 'postgresql://postgres.abcdef:' + encodeURIComponent(SECRET) + '@aws-0-eu.pooler.supabase.com:5432/postgres';
+check('a connection string is hidden in every form it could leak in', (() => {
+  const p = [];
+  const secrets = dashboard.secretsOf('"' + CONN + '"');
+  const leaks = ['quoted: "' + CONN + '"', 'bare: ' + CONN, 'typed: ' + encodeURIComponent(SECRET), 'decoded: ' + SECRET];
+  for (const text of leaks) {
+    const hidden = dashboard.hideSecrets(text, secrets);
+    if (hidden.includes(SECRET) || hidden.includes(encodeURIComponent(SECRET)) || hidden.includes('postgresql://')) p.push('leaked: ' + hidden);
+    if (!hidden.includes('[hidden]')) p.push('nothing hidden in: ' + text);
+  }
+  const deep = dashboard.hideSecretsIn({ a: [{ b: 'x ' + SECRET }], n: 3, ok: true }, secrets);
+  if (JSON.stringify(deep).includes(SECRET) || deep.n !== 3 || deep.ok !== true) p.push('inside a value: ' + JSON.stringify(deep));
+  if (dashboard.secretsOf('').length) p.push('an empty string has secrets');
+  if (dashboard.secretsOf('not a url at all').indexOf('not a url at all') === -1) p.push('a string that is not a URL is not hidden whole');
+  return p;
+})());
+
+check('a database re-check is fixed only when the check ran, the finding is gone, and its table was tested', (() => {
+  const p = [];
+  const target = { id: 'aaaaaaaa', check: 'data', where: 'orders', headline: 'Your orders table can be read by anyone.' };
+  const other = { id: 'bbbbbbbb', check: 'data', where: 'invoices', headline: 'x', severity: 'HIGH', status: 'confirmed' };
+  const v = (after, ran, saved) => dashboard.databaseVerdict(target, [target], after, ran, saved);
+  const ok = { ok: true };
+  if (v([], { ok: false, why: 'no connection' }, {}).verdict !== 'could not confirm') p.push('a check that did not run was not "could not confirm"');
+  if (v([target], ok, {}).verdict !== 'still open') p.push('a finding still there was not "still open"');
+  if (v([Object.assign({}, target, { from: 'nightly' })], ok, {}).verdict !== 'fixed') p.push('an older nightly answer kept it open');
+  const untested = v([], ok, { notChecked: [{ table: 'orders.email', why: 'seeding failed' }] });
+  if (untested.verdict !== 'could not confirm' || !/seeding failed/.test(untested.why)) p.push('a table that went untested was called fixed: ' + JSON.stringify(untested));
+  const fixed = v([other], ok, { notChecked: [{ table: 'invoices', why: 'x' }] });
+  if (fixed.verdict !== 'fixed') p.push('gone, and its own table tested: ' + fixed.verdict);
+  if (fixed.newProblems.length !== 1 || fixed.newProblems[0].id !== 'bbbbbbbb') p.push('the newly broken one was not named: ' + JSON.stringify(fixed.newProblems));
+  if (fixed.check !== 'data' || fixed.where !== 'orders' || !fixed.at) p.push('the record is missing what it is about');
+  return p;
+})());
+
+// Asynchronous, so it is awaited below with the server checks.
+const jobProblems = () => {
+  const p = [];
+  const jobs = dashboard.createJobs();
+  let release;
+  const held = new Promise((r) => (release = r));
+  let sayLater = null;
+  const first = jobs.start('db', 'Checking', 'npx kryptheon-night', (say) => {
+    say('Database: ' + CONN + '\x1b[31m red\x1b[0m');
+    say('one\ntwo');
+    sayLater = say;
+    return held.then(() => ({ ok: false, why: 'failed for ' + SECRET }));
+  }, dashboard.secretsOf(CONN));
+  if (!first || !first.running) p.push('it did not start: ' + JSON.stringify(first));
+  if (jobs.start('run', 'Again', '', () => ({ ok: true }))) p.push('a second job started while the first ran');
+  // The work starts on the next turn, so its lines are looked at after one.
+  return new Promise((r) => setTimeout(r, 20)).then(() => {
+    const lines = jobs.get().lines;
+    if (lines.join(' ').includes(SECRET) || lines.join(' ').includes('postgresql://')) p.push('a line leaked: ' + lines.join(' | '));
+    if (lines.join(' ').includes('\x1b')) p.push('colour codes kept');
+    if (lines.length !== 3) p.push('lines were not split: ' + JSON.stringify(lines));
+    release();
+    return held;
+  }).then(() => new Promise((r) => setTimeout(r, 20))).then(() => {
+    const done = jobs.get();
+    if (done.running || !done.endedAt) p.push('it did not end');
+    if (JSON.stringify(done.result).includes(SECRET)) p.push('the result leaked: ' + JSON.stringify(done.result));
+    sayLater('late: ' + SECRET);
+    if (jobs.get().lines.some((l) => l.includes(SECRET) || /late/.test(l))) p.push('a line said after the end was kept');
+    if (!jobs.start('run', 'Next', '', () => ({ ok: true }))) p.push('nothing could start after it ended');
+    return p;
+  });
+};
+
 check('the dashboard writes nothing into the project', (() => {
   const now = fs.readdirSync(project).sort().join(',');
   return now === before ? [] : ['the project now holds: ' + now];
@@ -352,7 +458,20 @@ function request(port, options, body) {
   });
 }
 
+// Follows the job a POST started until it ends, the way the page does.
+async function finished(port, host) {
+  const started = Date.now();
+  while (Date.now() - started < 60000) {
+    const r = await request(port, { path: '/api/job', headers: { host: host } });
+    const job = r.status === 200 ? JSON.parse(r.body).job : null;
+    if (job && !job.running) return job;
+    await new Promise((x) => setTimeout(x, 50));
+  }
+  return null;
+}
+
 (async () => {
+  check('a job runs alone, its lines are scrubbed, and it lets go of the secret when it ends', await jobProblems());
   const app = dashboard.createServer(project);
   const port = await app.listen(0);
   try {
@@ -437,8 +556,9 @@ function request(port, options, body) {
     let release;
     const held = new Promise((r) => (release = r));
     const runner = dashboard.createServer(project, {
-      run: (id) => {
+      run: (id, say) => {
         asked.push(id);
+        say('said by the runner');
         return asked.length === 1 ? held.then(() => ({ ok: true })) : { ok: true };
       },
     });
@@ -448,17 +568,20 @@ function request(port, options, body) {
       const runPage = await request(runPort, { path: '/', headers: { host: runHost } });
       const runToken = (runPage.body.match(/name="kryptheon-token" content="([0-9a-f]+)"/) || [])[1];
       const run = (id, t) => request(runPort, { method: 'POST', path: '/api/run', headers: { host: runHost, 'content-type': 'application/json', 'x-kryptheon-token': t } }, JSON.stringify({ id: id }));
-      const first = run('frontend', runToken);
-      await new Promise((r) => setTimeout(r, 150));
+      const first = await run('frontend', runToken);
       const second = await run('frontend', runToken);
+      const during = JSON.parse((await request(runPort, { path: '/api/job', headers: { host: runHost } })).body).job;
       release();
-      const firstDone = await first;
+      const firstDone = await finished(runPort, runHost);
       const data = await run('data', runToken);
       const na = await run('performance', runToken);
       const noTok = await run('frontend', 'nope');
       check('checks run from the page: only what can run, one at a time, with the token', (() => {
         const p = [];
-        if (firstDone.status !== 200) p.push('frontend run answered ' + firstDone.status + ' ' + firstDone.body);
+        if (first.status !== 202) p.push('starting the frontend run answered ' + first.status + ' ' + first.body);
+        if (!during || !during.running || during.kind !== 'run' || during.command !== 'npx kryptheon code') p.push('while it ran, /api/job said ' + JSON.stringify(during));
+        if (!during || !/said by the runner/.test((during.lines || []).join(' '))) p.push('the progress line from the runner is not on the job: ' + JSON.stringify(during && during.lines));
+        if (!firstDone || firstDone.running || !firstDone.result || !firstDone.result.ok) p.push('the finished job: ' + JSON.stringify(firstDone));
         if (second.status !== 409) p.push('a second run during the first answered ' + second.status);
         if (data.status !== 400) p.push('the database check, which needs a connection string, answered ' + data.status);
         if (na.status !== 400) p.push('a not-available check answered ' + na.status);
@@ -491,23 +614,142 @@ function request(port, options, body) {
       const badShape = await ask('../../x', reToken);
       const notOpen = await ask('deadbeef', reToken);
       const noTok = await ask(openId, 'nope');
-      const firstRe = ask(openId, reToken);
-      await new Promise((r) => setTimeout(r, 150));
+      const firstRe = await ask(openId, reToken);
       const busy = await ask(openId, reToken);
       releaseRe();
-      const done = await firstRe;
+      const done = await finished(rePort, reHost);
       check('re-check from the page: a real open finding, with the token, one at a time', (() => {
         const p = [];
         if (badShape.status !== 400) p.push('a malformed id answered ' + badShape.status);
         if (notOpen.status !== 404) p.push('an id that is not open answered ' + notOpen.status);
         if (noTok.status !== 403) p.push('no token answered ' + noTok.status);
         if (busy.status !== 409) p.push('a second re-check during the first answered ' + busy.status);
-        if (done.status !== 200 || JSON.parse(done.body).verdict !== 'fixed') p.push('the re-check answered ' + done.status + ' ' + done.body);
+        if (firstRe.status !== 202) p.push('starting the re-check answered ' + firstRe.status + ' ' + firstRe.body);
+        if (!done || !done.result || done.result.verdict !== 'fixed' || done.command !== 'npx kryptheon recheck ' + openId) p.push('the re-check job: ' + JSON.stringify(done));
         if (JSON.stringify(rechecked) !== JSON.stringify([openId])) p.push('the re-check ran for ' + JSON.stringify(rechecked));
         return p;
       })());
     } finally {
       await re.close();
+    }
+
+    // Record, the database and its words, from the page. Stand-ins that say
+    // back what they were handed - including, on purpose, the connection
+    // string - so the server can be seen keeping it off the page.
+    const handed = [];
+    let fixLanded = false;
+    const side = dashboard.createServer(project, {
+      record: (address, say) => { handed.push(['record', address]); say('opening ' + address); return { ok: true, recordings: ['checkout.spec.js'], summary: 'saved' }; },
+      db: (action, connection, say) => {
+        handed.push(['db', action, connection === CONN]);
+        // The fix landed: the next check finds nothing in orders.
+        if (fixLanded) fs.writeFileSync(kept.nightLast, JSON.stringify({ findings: [], notChecked: [] }), 'utf8');
+        say('Database: ' + connection);
+        return { ok: true, summary: 'nothing got through', echo: connection };
+      },
+      words: (connection) => {
+        handed.push(['words', connection === CONN ? 'CONN' : connection]);
+        return { help: ['step 1'], consent: ['I will'], installConsent: ['I stay'], nightlyAt: '0 3 * * *', given: Boolean(connection), warning: connection ? ['about ' + connection] : null, unusable: null };
+      },
+    });
+    const sidePort = await side.listen(0);
+    try {
+      const sideHost = '127.0.0.1:' + sidePort;
+      const sidePage = await request(sidePort, { path: '/', headers: { host: sideHost } });
+      const sideToken = (sidePage.body.match(/name="kryptheon-token" content="([0-9a-f]+)"/) || [])[1];
+      const ask = (where, body, t) => request(sidePort, { method: 'POST', path: where, headers: { host: sideHost, 'content-type': 'application/json', 'x-kryptheon-token': t === undefined ? sideToken : t } }, JSON.stringify(body));
+
+      const badAddress = await ask('/api/record', { url: '--headed' });
+      const noTokRecord = await ask('/api/record', { url: 'http://localhost:3000' }, 'nope');
+      const recorded = await ask('/api/record', { url: 'http://localhost:3000' });
+      const recordJob = await finished(sidePort, sideHost);
+      check('record from the page: an address only, with the token, as a job that names what it saved', (() => {
+        const p = [];
+        if (badAddress.status !== 400) p.push('an option as the address answered ' + badAddress.status);
+        if (noTokRecord.status !== 403) p.push('no token answered ' + noTokRecord.status);
+        if (recorded.status !== 202) p.push('recording answered ' + recorded.status + ' ' + recorded.body);
+        if (!recordJob || !recordJob.result || JSON.stringify(recordJob.result.recordings) !== '["checkout.spec.js"]') p.push('the record job: ' + JSON.stringify(recordJob));
+        if (recordJob && recordJob.command !== 'npx kryptheon record http://localhost:3000') p.push('its terminal command: ' + recordJob.command);
+        if (JSON.stringify(handed[0]) !== JSON.stringify(['record', 'http://localhost:3000'])) p.push('the recorder was handed ' + JSON.stringify(handed[0]));
+        return p;
+      })());
+
+      const help = await ask('/api/db/words', {});
+      const judged = await ask('/api/db/words', { connection: CONN });
+      check('the database words come from kryptheon-night, and never carry the string back', (() => {
+        const p = [];
+        if (help.status !== 200 || JSON.parse(help.body).words.help[0] !== 'step 1') p.push('the help: ' + help.status + ' ' + help.body);
+        if (judged.status !== 200) p.push('with a string it answered ' + judged.status);
+        if (judged.body.includes(SECRET) || judged.body.includes(encodeURIComponent(SECRET)) || judged.body.includes('postgresql://')) p.push('the string came back: ' + judged.body);
+        if (!/about \[hidden\]/.test(judged.body)) p.push('the warning was not kept, with the string hidden: ' + judged.body);
+        return p;
+      })());
+
+      const noConn = await ask('/api/db', { action: 'scan' });
+      const badAction = await ask('/api/db', { action: 'drop', connection: CONN });
+      const noTokDb = await ask('/api/db', { action: 'scan', connection: CONN }, 'nope');
+      const scanned = await ask('/api/db', { action: 'scan', connection: CONN });
+      const dbJob = await finished(sidePort, sideHost);
+      const later = await request(sidePort, { path: '/api/job', headers: { host: sideHost } });
+      const stateAfter = await request(sidePort, { path: '/api/state', headers: { host: sideHost } });
+      check('the database check from the page: the string goes to the check, and nowhere back to the page', (() => {
+        const p = [];
+        if (noConn.status !== 400) p.push('no string answered ' + noConn.status);
+        if (badAction.status !== 400) p.push('an unknown action answered ' + badAction.status);
+        if (noTokDb.status !== 403) p.push('no token answered ' + noTokDb.status);
+        if (scanned.status !== 202) p.push('the check answered ' + scanned.status + ' ' + scanned.body);
+        if (!handed.some((h) => h[0] === 'db' && h[1] === 'scan' && h[2] === true)) p.push('the check was not handed the string: ' + JSON.stringify(handed));
+        if (!dbJob || dbJob.result.summary !== 'nothing got through' || dbJob.command !== 'npx kryptheon-night') p.push('the job: ' + JSON.stringify(dbJob));
+        for (const [what, body] of [['the start', scanned.body], ['the job', later.body], ['the state', stateAfter.body]]) {
+          if (body.includes(SECRET) || body.includes(encodeURIComponent(SECRET)) || body.includes('pooler.supabase.com')) p.push(what + ' carried the string back');
+        }
+        if (dbJob && !dbJob.lines.some((l) => l === 'Database: [hidden]')) p.push('the line saying it was not hidden: ' + JSON.stringify(dbJob.lines));
+        return p;
+      })());
+
+      // A database finding re-checked from the page: the check runs again and
+      // that finding is judged and recorded like any other re-check.
+      await ask('/api/check', { id: 'data', on: true });
+      const dbFinding = dashboard.buildState(project).findings.find((f) => f.check === 'data');
+      const notData = dashboard.buildState(project).findings.find((f) => f.check !== 'data');
+      const wrongKind = await ask('/api/db', { action: 'recheck', id: notData.id, connection: CONN });
+      fixLanded = true;
+      const reStart = await ask('/api/db', { action: 'recheck', id: dbFinding ? dbFinding.id : 'x', connection: CONN });
+      const reJob = await finished(sidePort, sideHost);
+      let kept2 = [];
+      try { kept2 = fs.readFileSync(kept.fixes, 'utf8').split(String.fromCharCode(10)).filter(Boolean).map((l) => JSON.parse(l)); } catch (err) { kept2 = []; }
+      check('a database finding is re-checked through the database, judged, and recorded', (() => {
+        const p = [];
+        if (!dbFinding) return ['no database finding to re-check'];
+        if (wrongKind.status !== 404) p.push('a finding that is not a database one answered ' + wrongKind.status);
+        if (reStart.status !== 202) p.push('the re-check answered ' + reStart.status + ' ' + reStart.body);
+        if (!reJob || !reJob.result || reJob.result.verdict !== 'fixed' || reJob.result.id !== dbFinding.id) p.push('the job: ' + JSON.stringify(reJob && reJob.result));
+        if (handed[handed.length - 1][1] !== 'scan') p.push('the database was asked for ' + handed[handed.length - 1][1]);
+        const rec = kept2.find((a) => a.id === dbFinding.id);
+        if (!rec || rec.verdict !== 'fixed') p.push('not recorded: ' + JSON.stringify(kept2));
+        if (reJob && (JSON.stringify(reJob).includes(SECRET) || JSON.stringify(reJob).includes(encodeURIComponent(SECRET)))) p.push('the string came back');
+        return p;
+      })());
+
+      // Nothing about the string reached the store either.
+      check('the connection string is written to no file', (() => {
+        const p = [];
+        const walk = (dir) => {
+          for (const name of fs.readdirSync(dir)) {
+            const full = path.join(dir, name);
+            if (fs.statSync(full).isDirectory()) walk(full);
+            else {
+              const text = fs.readFileSync(full, 'latin1');
+              if (text.includes(SECRET) || text.includes(encodeURIComponent(SECRET))) p.push(full + ' holds it');
+            }
+          }
+        };
+        walk(process.env.KRYPTHEON_HOME);
+        walk(project);
+        return p;
+      })());
+    } finally {
+      await side.close();
     }
 
     // And after every request above: still nothing of Kryptheon's in the project.
@@ -544,7 +786,20 @@ function request(port, options, body) {
   fs.writeFileSync(path.join(project, 'src', 'offer.js'),
     'async function f(){ const r = await fetch("/o"); const o = await r.json(); box.innerHTML = `${o.text}`; }\n', 'utf8');
   const beforeCli = fs.readdirSync(project).sort().join(',');
-  const child = spawn(process.execPath, [cli, 'dashboard'], { cwd: project, env: process.env });
+  const opened = path.join(project, '..', path.basename(project) + '-opened.txt');
+  const opener = path.join(project, '..', path.basename(project) + '-opener.js');
+  fs.writeFileSync(opener, 'require("fs").writeFileSync(' + JSON.stringify(opened) + ', process.argv[2]);\n', 'utf8');
+  // A stand-in for kryptheon-night, outside the project and the store.
+  const fakeNight = path.join(project, '..', path.basename(project) + '-night.js');
+  fs.writeFileSync(fakeNight, [
+    'const args = process.argv.slice(2);',
+    'if (args[0] === "words") { console.log(JSON.stringify({ help: ["from the stand-in"], consent: [], installConsent: [], nightlyAt: "0 3 * * *", given: !!process.env.KN_DATABASE_URL, warning: null, unusable: null })); process.exit(0); }',
+    'console.log("args: " + JSON.stringify(args));',
+    'console.log("env: " + (process.env.KN_DATABASE_URL === ' + JSON.stringify(CONN) + ' ? "same" : "different"));',
+    'if (process.argv.join(" ").includes(' + JSON.stringify(SECRET) + ')) console.log("argv-has-secret");',
+    'console.log("echo: " + process.env.KN_DATABASE_URL);',
+  ].join(String.fromCharCode(10)), 'utf8');
+  const child = spawn(process.execPath, [cli, 'dashboard'], { cwd: project, env: Object.assign({}, process.env, { KRYPTHEON_BROWSER: opener, KRYPTHEON_NO_OPEN: '', KRYPTHEON_NIGHT_BIN: fakeNight }) });
   let out = '';
   child.stdout.on('data', (c) => (out += c));
   try {
@@ -553,22 +808,66 @@ function request(port, options, body) {
     const address = (out.match(/http:\/\/127\.0\.0\.1:(\d+)\//) || [])[1];
     let saved = null;
     let ran = null;
+    let ranJob = null;
     if (address) {
       const cliHost = '127.0.0.1:' + address;
       const cliPage = await request(Number(address), { path: '/', headers: { host: cliHost } });
       const cliToken = (cliPage.body.match(/name="kryptheon-token" content="([0-9a-f]+)"/) || [])[1];
       ran = await request(Number(address), { method: 'POST', path: '/api/run', headers: { host: cliHost, 'content-type': 'application/json', 'x-kryptheon-token': cliToken } }, JSON.stringify({ id: 'frontend' }));
+      ranJob = await finished(Number(address), cliHost);
       try { saved = JSON.parse(fs.readFileSync(kept.codeFindings, 'utf8')); } catch (err) { saved = null; }
     }
+    check('the dashboard command starts, opens the page in the browser by itself, and still prints the address', (() => {
+      if (!address) return ['no address printed: ' + out.slice(0, 400)];
+      const p = [];
+      let got = null;
+      for (let i = 0; i < 50 && got === null; i++) {
+        try { got = fs.readFileSync(opened, 'utf8'); } catch (err) { require('child_process').spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},100)']); }
+      }
+      if (got !== 'http://127.0.0.1:' + address + '/') p.push('the browser was asked to open ' + JSON.stringify(got));
+      if (!/opening in your browser/.test(out)) p.push('it does not say it is opening the browser: ' + out.slice(0, 400));
+      return p;
+    })());
     check('the dashboard command starts, and its Run now saves a real read to the store', (() => {
       const p = [];
       if (!address) return ['no address printed: ' + out.slice(0, 400)];
-      if (!ran || ran.status !== 200) p.push('Run now answered ' + (ran && ran.status) + ' ' + (ran && ran.body));
+      if (!ran || ran.status !== 202) p.push('Run now answered ' + (ran && ran.status) + ' ' + (ran && ran.body));
+      if (!ranJob || !ranJob.result || !ranJob.result.ok || !/Read \d+ files?\./.test(ranJob.lines.join(' '))) p.push('the run job: ' + JSON.stringify(ranJob));
       const found = saved && (saved.findings || []).find((f) => f.file === 'src/offer.js');
       if (!found) p.push('no read of src/offer.js was saved: ' + JSON.stringify(saved && saved.findings));
       else if (found.origin !== 'network') p.push('the saved finding says ' + found.origin);
       const now = fs.readdirSync(project).sort().join(',');
       if (now !== beforeCli) p.push('the project changed: ' + now);
+      return p;
+    })());
+
+    // The database check through the real command, with a stand-in for
+    // kryptheon-night that says back what it was started with: its words,
+    // whether the string arrived in its environment, and - on purpose - the
+    // string itself, which must reach the page only as [hidden].
+    let dbRun = null;
+    let dbWords = null;
+    if (address) {
+      const cliHost = '127.0.0.1:' + address;
+      const cliPage = await request(Number(address), { path: '/', headers: { host: cliHost } });
+      const cliToken = (cliPage.body.match(/name="kryptheon-token" content="([0-9a-f]+)"/) || [])[1];
+      const ask = (where, body) => request(Number(address), { method: 'POST', path: where, headers: { host: cliHost, 'content-type': 'application/json', 'x-kryptheon-token': cliToken } }, JSON.stringify(body));
+      dbWords = await ask('/api/db/words', { connection: CONN });
+      await ask('/api/db', { action: 'install', connection: CONN });
+      dbRun = await finished(Number(address), cliHost);
+    }
+    check('the dashboard command runs kryptheon-night with the string in its environment only, and keeps it off the page', (() => {
+      if (!dbRun) return ['no database job finished'];
+      const p = [];
+      const said = dbRun.lines.join('\n');
+      if (!/args: \["install","--yes"\]/.test(said)) p.push('kryptheon-night was not started with install --yes: ' + said);
+      if (!/env: same/.test(said)) p.push('the string did not arrive in its environment: ' + said);
+      if (/argv-has-secret/.test(said)) p.push('the string was on its command line');
+      if (said.includes(SECRET) || said.includes(encodeURIComponent(SECRET))) p.push('the string reached the page');
+      if (!/echo: \[hidden\]/.test(said)) p.push('the echoed string was not hidden: ' + said);
+      if (!dbWords || dbWords.status !== 200 || !/"help":\["from the stand-in"\]/.test(dbWords.body)) p.push('the words: ' + (dbWords && dbWords.body));
+      if (dbWords && (dbWords.body.includes(SECRET) || dbWords.body.includes(encodeURIComponent(SECRET)))) p.push('the words carried the string back');
+      if (/KN_DATABASE_URL/.test(out) || out.includes(SECRET) || out.includes(encodeURIComponent(SECRET))) p.push('the dashboard\'s own terminal printed it');
       return p;
     })());
 
@@ -602,6 +901,9 @@ function request(port, options, body) {
     })());
   } finally {
     child.kill();
+    fs.rmSync(opened, { force: true });
+    fs.rmSync(opener, { force: true });
+    fs.rmSync(fakeNight, { force: true });
   }
 
   // Run by a script, with no command, it must not start a server that never
@@ -611,7 +913,7 @@ function request(port, options, body) {
     const p = [];
     if (bare.error) p.push('it did not exit: ' + bare.error.message);
     if (bare.status !== 0) p.push('exit ' + bare.status);
-    if (!/npx kryptheon dashboard/.test(bare.stdout || '')) p.push('the usage does not mention the dashboard');
+    if (!/npx kryptheon@latest dashboard/.test(bare.stdout || '')) p.push('the usage does not mention the dashboard');
     if (/127\.0\.0\.1:\d+/.test(bare.stdout || '')) p.push('it started a server');
     return p;
   })());

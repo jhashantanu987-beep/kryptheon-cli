@@ -6,6 +6,30 @@ plain English what broke.
 Runs entirely on your machine. No account, no API key, nothing leaves your
 computer. It is a wrapper around [Playwright](https://playwright.dev).
 
+## The one command
+
+```
+npx kryptheon@latest dashboard
+```
+
+Run it in your project's folder. It opens a page in your browser, and
+everything else is a button on that page:
+
+| | how often |
+| --- | --- |
+| Read my code | after every change |
+| Record a flow | one time - again only when that flow changes |
+| Replay | after every change |
+| Connect your database | one time |
+| Check my database | after every change |
+| Set up the nightly check | one time |
+| Re-check a finding | after every change |
+
+Every button shows the terminal command that does the same thing, in small
+print, for when the page cannot be used. The database connection string is
+pasted into the page, used for one run, and never saved, logged or shown
+again; reload the page and it is gone.
+
 ## Only have a web address?
 
 Built your app in Lovable, Bolt or v0, and there is no project folder on your
@@ -168,15 +192,17 @@ npx kryptheon
 ```
 
 In a terminal, with no command, this opens a page on your own machine
-(`http://127.0.0.1:4789/`) for this project: what is broken, what needs a
-look, every run, recent changes, and switches for each check. `Run now`
-replays your recordings or reads your code from the page. It is only
-reachable from this machine; press Ctrl+C to stop it. From a script, use
-`npx kryptheon dashboard`.
+(`http://127.0.0.1:4789/`) for this project, in your browser by itself (the
+address is printed too): what is broken, what needs a look, every run, recent
+changes, and switches for each check. Every check runs from a button, one at a
+time, with its progress shown on the page as it goes. It is only reachable
+from this machine; press Ctrl+C to stop it. From a script, use
+`npx kryptheon dashboard`; set `KRYPTHEON_NO_OPEN=1` to keep the browser shut.
 
 It opens on the one thing to do next, and under it "Start here": read your
-code, record your main flows, replay them, check your database - in that
-order, each marked done only once it has actually run.
+code, record your main flows, replay them, connect and check your database,
+and set up the nightly check - each marked done only once it has actually run,
+and each labelled "one time" or "after every change".
 
 Checks that are not built yet are listed as "not available" - never as
 passed.

@@ -376,7 +376,57 @@ const cases = [
     name: 'prompt omits timing when there is no previous pass',
     errors: [{ message: 'Error: something unfamiliar\n' }],
     expectPrintedMissing: ['This was working'],
-    expectPrinted: ['Fix only this.'],
+    // Never passed, so nothing broke: the AI tool is not told to fix the app.
+    // Found on a blind test (LaunchRail), where it said "My flow broke. Fix
+    // only this." about a recording on its very first replay.
+    expectPrinted: ['has never passed', 'whether the recording or the app is at fault'],
+    expectPromptMissing: ['flow broke', 'Fix only this.'],
+  },
+  {
+    name: 'a test that used to pass still asks to fix only this',
+    errors: [{ message: 'Error: something unfamiliar\n' }],
+    lastPassedMinutesAgo: 20,
+    expectPrinted: ['flow broke', 'Fix only this.'],
+    expectPromptMissing: ['has never passed'],
+  },
+  // --- Two things on the page match one step. Found on a blind test
+  // (LaunchRail): two "Review" buttons, and the first run blamed "Sign out"
+  // and "Create" as steps that cannot repeat - steps that had nothing to do
+  // with it.
+  {
+    name: 'two matches for one step are said as that, not blamed on a step that cannot repeat',
+    errors: [
+      {
+        message:
+          "Error: locator.click: Error: strict mode violation: getByRole('button', { name: 'Review' }) resolved to 2 elements:\n" +
+          "    1) <button data-id=\"CR-481\" class=\"publish\">Review</button> aka getByRole('button', { name: 'Review' }).first()\n" +
+          "    2) <button data-id=\"CR-479\" class=\"publish\">Review</button> aka getByRole('button', { name: 'Review' }).nth(1)\n",
+      },
+    ],
+    specSource:
+      "test('t', async ({ page }) => {\n" +
+      "  await page.goto('https://app.test/');\n" +
+      "  await page.getByRole('button', { name: 'Create' }).click();\n" +
+      "  await page.getByRole('button', { name: 'Review' }).click();\n" +
+      "  await page.getByRole('button', { name: 'Sign out' }).click();\n});\n",
+    expectContains: ['the button "Review"', '2 of them'],
+    expectPrinted: ['This is the first run of this recording', 'record this step again'],
+    expectPrintedMissing: ['Most likely the step that cannot repeat', '"Sign out"', '"Create"'],
+    expectPromptMissing: ['Fix only this.'],
+  },
+  {
+    name: '...and the same after it has passed before is still two matches, not "could not find"',
+    errors: [
+      {
+        message:
+          "Error: locator.click: Error: strict mode violation: getByRole('button', { name: 'Review' }) resolved to 3 elements:\n" +
+          "    1) <button>Review</button> aka getByRole('button', { name: 'Review' }).first()\n",
+      },
+    ],
+    lastPassedMinutesAgo: 10,
+    expectContains: ['the button "Review"', '3 of them'],
+    expectMissing: ['Could not find'],
+    expectPrinted: ['This was working', 'record this step again'],
   },
 ];
 

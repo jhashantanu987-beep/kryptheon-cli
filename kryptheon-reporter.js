@@ -315,6 +315,22 @@ function translate(message) {
     };
   }
 
+  // One step, more than one match: "strict mode violation: getByRole(...)
+  // resolved to 2 elements". The thing is there - too many times over - so
+  // "could not find" would be the wrong story. Found on a blind test
+  // (LaunchRail): two "Review" buttons, and the first run blamed steps that
+  // had nothing to do with it.
+  m = msg.match(/strict mode violation:\s*([\s\S]+?)\s+resolved to (\d+) elements/);
+  if (m) {
+    const what = describeLocator(m[1]) || 'what this step looks for';
+    return {
+      reason: 'The recording asks for ' + what + ', but the page has ' + m[2] + ' of them and it does not say which one.',
+      advice: 'record this step again and click something only that one has. If the page should show just one, ' +
+        'the step before it may have left the page in a different state than when it was recorded.',
+      ambiguous: true,
+    };
+  }
+
   // Navigation failures, e.g. "page.goto: net::ERR_NAME_NOT_RESOLVED at <url>"
   m = msg.match(/(?:page\.goto|page\.reload|page\.goBack)[^\n]*?(net::[A-Z_]+)(?:\s+at\s+(\S+))?/);
   if (m) {
@@ -600,7 +616,14 @@ function asSentence(text) {
 
 function buildPromptLines(testTitle, translated, obs, lastPassIso, now) {
   const sentences = [];
-  sentences.push('My "' + testTitle + '" flow broke.');
+  // Never passed: nothing broke, so an AI tool must not be sent off to "fix"
+  // the app. Found on a blind test (LaunchRail): "My flow broke. Fix only
+  // this." about a recording on its very first replay.
+  if (!lastPassIso) {
+    sentences.push('My "' + testTitle + '" recording has never passed - this was its first replay.');
+  } else {
+    sentences.push('My "' + testTitle + '" flow broke.');
+  }
 
   // What failed.
   if (translated.urlActual && translated.urlExpected) {
@@ -629,7 +652,11 @@ function buildPromptLines(testTitle, translated, obs, lastPassIso, now) {
   const ago = lastPassIso ? timeAgo(lastPassIso, now) : null;
   if (ago) sentences.push('This was working ' + ago + '.');
 
-  sentences.push('Fix only this.');
+  if (lastPassIso) {
+    sentences.push('Fix only this.');
+  } else {
+    sentences.push('Before changing the app, help me work out whether the recording or the app is at fault.');
+  }
 
   const body = wrapText(sentences.map(asSentence).filter(Boolean).join(' '), 72);
   return ['   Paste this into your AI tool:', '   ' + '─'.repeat(29)].concat(
@@ -917,7 +944,12 @@ class KryptheonReporter {
     // nothing has broken, because nothing ever worked. Far more often the
     // recording contains a step that cannot happen twice.
     let blamedTheRecording = false;
-    if (!lastPass) {
+    if (!lastPass && translated.ambiguous) {
+      // The failure already says what is wrong with the recording: guessing
+      // at a step that cannot repeat would point somewhere else entirely.
+      out.push('   This is the first run of this recording, so nothing has broken yet -');
+      out.push('   it stopped on a step that matches more than one thing on the page.');
+    } else if (!lastPass) {
       const advice = firstRunAdvice(test);
       for (const line of advice.lines) out.push(line);
       blamedTheRecording = advice.namedAStep;

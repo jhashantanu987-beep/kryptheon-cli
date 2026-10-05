@@ -432,6 +432,50 @@ function isCatchParam(node, scope) {
 // from itself (count = count + 1) is not followed round in a circle.
 const RESOLVING = new Set();
 
+// The project being read, for a value imported from another of its files:
+// where each file's names lead, and which of them anything ever writes to.
+// Set by scanProject for the length of one read, like FN_PATHS.
+let IMPORTS = null;
+// Which file each parsed program is, so an import is resolved from the file
+// that wrote it - which, once a helper in another folder is being judged, is
+// not the file the sink is in.
+let PROGRAM_FILE = new WeakMap();
+
+/**
+ * Fixed data another file of the project exports - `export const demo = {...}`
+ * of nothing but literals - is as safe as those literals, and only while no
+ * file writes to it. Found on a blind test (LaunchRail): mock-data.js exported
+ * the demo workspace, ui.js rendered it through a shell() helper, and the
+ * import was read as unknown - so a safe page was reported.
+ *
+ * What is followed, and what is not:
+ *   - a named import of a `const` declared at the top of a project file;
+ *   - nothing at all if any file of the project could not be read, since a
+ *     write could be in that file (IMPORTS.blind);
+ *   - a write anywhere - through the import, any other file's import of it,
+ *     a namespace import, a local name given to part of it, or the defining
+ *     file itself - makes it unknown again (IMPORTS.written).
+ * Handing it out - `return demo.flags` - is a read, and is not followed into
+ * whoever receives it. That is the one place a write could still be missed: a
+ * caller that pushes into the very list it was returned. Writing into shared
+ * fixed data that way is rare enough to accept here, and is said so.
+ */
+function fromImport(binding, depth) {
+  if (!IMPORTS || IMPORTS.blind) return 'unknown';
+  const spec = binding.path && binding.path.node;
+  if (!spec || spec.type !== 'ImportSpecifier') return 'unknown';
+  const program = binding.scope && binding.scope.getProgramParent();
+  const here = program && PROGRAM_FILE.get(program.block);
+  if (!here) return 'unknown';
+  const decl = binding.path.parentPath && binding.path.parentPath.node;
+  const from = decl && decl.source && decl.source.value;
+  const name = spec.imported && (spec.imported.name || spec.imported.value);
+  const found = from && name ? IMPORTS.constOf(here, from, name) : null;
+  if (!found) return 'unknown';
+  if (IMPORTS.written.has(found.full + '::' + name) || IMPORTS.written.has(found.full + '::*')) return 'unknown';
+  return classify(found.init, found.scope, found.code, depth + 1);
+}
+
 /** What a name was set to, followed one step back when that says anything. */
 function fromBinding(id, scope, code, depth, aliases) {
   if (id && aliases && Object.prototype.hasOwnProperty.call(aliases, id.name)) return aliases[id.name];
@@ -440,6 +484,7 @@ function fromBinding(id, scope, code, depth, aliases) {
   if (!binding) return 'unknown';
   if (binding.path && binding.path.type === 'CatchClause') return 'error';
   if (binding.kind === 'param') return fromCalls(binding, code, depth);
+  if (binding.kind === 'module') return fromImport(binding, depth);
   const init = binding.path && binding.path.node && binding.path.node.init;
   const later = binding.constantViolations || [];
   if (!init && !later.length) return 'unknown';
@@ -725,19 +770,24 @@ function helperOf(value, scope, code, file, lineOffset, resolver) {
  * once a file; its functions are handed to the map() reader each time, since
  * that table is rebuilt for every file read.
  */
+/** The project file a relative import names, or null for a package or nothing. */
+function resolveModule(fromFile, source) {
+  if (!/^\.\.?\//.test(source)) return null;
+  const EXTS = ['', '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '/index.js', '/index.ts'];
+  const base = path.resolve(path.dirname(fromFile), source);
+  return EXTS.map((ext) => base + ext).find((candidate) => {
+    try {
+      return fs.statSync(candidate).isFile() && CODE_EXT.test(candidate);
+    } catch (err) {
+      return false;
+    }
+  }) || null;
+}
+
 function importResolver(parser, root) {
   const parsed = new Map();
-  const EXTS = ['', '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '/index.js', '/index.ts'];
-  return (fromFile, source, name) => {
-    if (!/^\.\.?\//.test(source)) return null;
-    const base = path.resolve(path.dirname(fromFile), source);
-    const full = EXTS.map((ext) => base + ext).find((candidate) => {
-      try {
-        return fs.statSync(candidate).isFile() && CODE_EXT.test(candidate);
-      } catch (err) {
-        return false;
-      }
-    });
+  const entryOf = (fromFile, source) => {
+    const full = resolveModule(fromFile, source);
     if (!full) return null;
     if (!parsed.has(full)) {
       let entry = null;
@@ -751,6 +801,7 @@ function importResolver(parser, root) {
             Program(p) { program = p.scope; },
             Function(p) { fns.push(p); },
           });
+          if (program) PROGRAM_FILE.set(program.block, full);
           entry = { code: code, program: program, fns: fns, file: path.relative(root, full).split(path.sep).join('/') };
         }
       } catch (err) {
@@ -761,14 +812,147 @@ function importResolver(parser, root) {
     const entry = parsed.get(full);
     if (!entry || !entry.program) return null;
     for (const p of entry.fns) FN_PATHS.set(p.node, p);
+    return Object.assign({ full: full }, entry);
+  };
+  const resolve = (fromFile, source, name) => {
+    const entry = entryOf(fromFile, source);
+    if (!entry) return null;
     const fnPath = localFunction(name, entry.program);
     return fnPath ? { fnPath: fnPath, code: entry.code, file: entry.file } : null;
   };
+  // A `const` the file declares at its top, with the value it is given there.
+  resolve.constOf = (fromFile, source, name) => {
+    const entry = entryOf(fromFile, source);
+    if (!entry) return null;
+    const binding = entry.program.getBinding(name);
+    const node = binding && binding.path && binding.path.node;
+    if (!binding || binding.kind !== 'const' || !node || node.type !== 'VariableDeclarator' || !node.init) return null;
+    if (binding.constantViolations && binding.constantViolations.length) return null;
+    return { full: entry.full, init: node.init, scope: binding.path.scope, code: entry.code };
+  };
+  return resolve;
+}
+
+// Methods that change the array, map or set they are called on.
+const MUTATORS = /^(push|pop|shift|unshift|splice|sort|reverse|fill|copyWithin|set|add|delete|clear)$/;
+// Calls that only read what they are given.
+const READS_ONLY = /^(String|Number|Boolean|JSON\.stringify|console\.\w+|Array\.isArray|Object\.(keys|values|entries|freeze|isFrozen))$/;
+// Methods that only read their argument: list.concat(demo.changes) builds a
+// new list and leaves demo alone. push() and the like are not here - they put
+// the value somewhere it can be written through.
+const READS_ARGUMENT = /^(concat|includes|indexOf|lastIndexOf|startsWith|endsWith|localeCompare|has|at)$/;
+
+/**
+ * Whether this use of a name can change what the name holds: an assignment or
+ * delete through it, a mutating method on it, or handing it to a call that
+ * could change it. A local name given to part of it - `const list = demo.flags`
+ * - is followed, since writing to the list writes to demo.
+ */
+function writtenThrough(ref, depth) {
+  if ((depth || 0) > 4) return true;
+  let p = ref;
+  while (p.parentPath && /MemberExpression$/.test(p.parentPath.node.type) && p.parentPath.node.object === p.node) p = p.parentPath;
+  const parentPath = p.parentPath;
+  const parent = parentPath && parentPath.node;
+  if (!parent) return false;
+  if (parent.type === 'UpdateExpression') return true;
+  if (parent.type === 'UnaryExpression' && parent.operator === 'delete') return true;
+  // The target of an assignment, plain or inside a destructuring pattern.
+  let up = p;
+  while (up.parentPath && /^(ObjectProperty|ObjectPattern|ArrayPattern|AssignmentPattern|RestElement)$/.test(up.parentPath.node.type)) up = up.parentPath;
+  const holder = up.parentPath && up.parentPath.node;
+  if (holder && holder.type === 'AssignmentExpression' && holder.left === up.node) return true;
+  if (holder && /^For(Of|In)Statement$/.test(holder.type) && holder.left === up.node) return true;
+  if (/CallExpression$/.test(parent.type)) {
+    if (parent.callee === p.node) {
+      return /MemberExpression$/.test(p.node.type) && MUTATORS.test(calleeName(p.node));
+    }
+    if (parent.arguments.indexOf(p.node) !== -1) {
+      const callee = parent.callee;
+      const full = callee.type === 'MemberExpression' && callee.object.type === 'Identifier'
+        ? callee.object.name + '.' + calleeName(callee) : calleeName(callee);
+      if (/MemberExpression$/.test(callee.type) && READS_ARGUMENT.test(calleeName(callee))) return false;
+      return !(MAKES_SAFE.test(calleeName(callee)) || READS_ONLY.test(full));
+    }
+  }
+  if (parent.type === 'VariableDeclarator' && parent.init === p.node && parent.id.type === 'Identifier') {
+    const alias = parentPath.scope.getBinding(parent.id.name);
+    if (!alias) return true;
+    if (alias.constantViolations && alias.constantViolations.length) return true;
+    return (alias.referencePaths || []).some((r) => writtenThrough(r, (depth || 0) + 1));
+  }
+  return false;
+}
+
+/**
+ * Every project name something writes to, as "<file>::<name>", read once over
+ * the whole project before any file is judged. `blind` when a file could not
+ * be read: a write could be in it, so no import is trusted at all.
+ */
+function projectWrites(parser, files) {
+  const written = new Set();
+  let blind = false;
+  for (const full of files) {
+    let pieces;
+    try {
+      if (fs.statSync(full).size > MAX_BYTES) continue;
+      const source = fs.readFileSync(full, 'utf8');
+      pieces = PAGE_EXT.test(full) ? scriptsIn(source) : [{ code: source }];
+    } catch (err) {
+      blind = true;
+      continue;
+    }
+    for (const piece of pieces) {
+      let ast;
+      try {
+        ast = parser.babelParse(piece.code, full, true);
+      } catch (err) {
+        blind = true;
+        continue;
+      }
+      parser.traverse(ast, {
+        Program(p) {
+          // This file's own top-level names, written to here.
+          for (const name of Object.keys(p.scope.bindings)) {
+            const b = p.scope.bindings[name];
+            if (b.kind === 'module') continue;
+            if ((b.constantViolations && b.constantViolations.length) ||
+                (b.referencePaths || []).some((r) => writtenThrough(r))) {
+              written.add(full + '::' + name);
+            }
+          }
+        },
+        ImportDeclaration(p) {
+          const from = resolveModule(full, p.node.source.value);
+          if (!from) return;
+          for (const spec of p.node.specifiers) {
+            const b = p.scope.getBinding(spec.local.name);
+            if (!b) continue;
+            if (spec.type === 'ImportNamespaceSpecifier') {
+              for (const r of b.referencePaths || []) {
+                const m = r.parentPath && r.parentPath.node;
+                if (m && /MemberExpression$/.test(m.type) && m.object === r.node && !m.computed && m.property.type === 'Identifier') {
+                  if (writtenThrough(r.parentPath)) written.add(from + '::' + m.property.name);
+                } else {
+                  written.add(from + '::*');
+                }
+              }
+              continue;
+            }
+            const name = spec.type === 'ImportDefaultSpecifier' ? 'default' : (spec.imported.name || spec.imported.value);
+            if ((b.referencePaths || []).some((r) => writtenThrough(r))) written.add(from + '::' + name);
+          }
+        },
+      });
+    }
+  }
+  return { written: written, blind: blind };
 }
 
 function sinksIn(parser, code, file, lineOffset, resolver) {
   const found = [];
   const ast = parser.babelParse(code, file, true);
+  PROGRAM_FILE.set(ast.program, file);
   const lineOf = (node) => (node.loc ? node.loc.start.line : 1) + lineOffset - 1;
   const textOf = (node) => code.slice(node.start, node.end).replace(/\s+/g, ' ').slice(0, 160);
   // Calls to plain named functions, so a helper's sink can be judged by what
@@ -936,36 +1120,48 @@ function scanProject(root, options) {
   }
   const loadedBy = keys.scriptsLoadedBy(pages);
   const resolver = importResolver(parser, root);
-  for (const full of files) {
-    let size = 0;
-    try {
-      size = fs.statSync(full).size;
-    } catch (err) {
-      continue;
-    }
-    const rel = path.relative(root, full).split(path.sep).join('/');
-    if (size > MAX_BYTES) {
-      unreadable.push({ file: rel, why: 'larger than ' + Math.round(MAX_BYTES / 1024) + ' KB, probably generated' });
-      continue;
-    }
-    const source = fs.readFileSync(full, 'utf8');
-    filesRead++;
-    for (const k of keys.secretsIn(rel, source, loadedBy)) secrets.push(k);
-    const pieces = PAGE_EXT.test(full) ? scriptsIn(source) : [{ code: source, line: 1 }];
-    for (const piece of pieces) {
+  // Before any file is judged: which of the project's own names anything
+  // writes to, so fixed data is only trusted while it really is fixed.
+  PROGRAM_FILE = new WeakMap();
+  IMPORTS = Object.assign({ constOf: resolver.constOf }, projectWrites(parser, files));
+  try {
+    readAll();
+  } finally {
+    IMPORTS = null;
+  }
+  return { ran: true, filesRead: filesRead, findings: secrets.concat(findings.map(describe)), unreadable: unreadable };
+
+  function readAll() {
+    for (const full of files) {
+      let size = 0;
       try {
-        for (const f of sinksIn(parser, piece.code, full, piece.line, resolver)) findings.push(Object.assign({ file: rel }, f));
+        size = fs.statSync(full).size;
       } catch (err) {
-        unreadable.push({ file: rel + (piece.line > 1 ? ':' + piece.line : ''), why: 'could not be parsed: ' + String(err.message).split('\n')[0].slice(0, 120) });
+        continue;
       }
-    }
-    if (/\.(vue|html)$/i.test(full)) {
-      for (const v of vHtmlIn(source)) {
-        findings.push({ file: rel, line: v.line, sink: 'v-html', expression: v.expression, origin: 'unknown' });
+      const rel = path.relative(root, full).split(path.sep).join('/');
+      if (size > MAX_BYTES) {
+        unreadable.push({ file: rel, why: 'larger than ' + Math.round(MAX_BYTES / 1024) + ' KB, probably generated' });
+        continue;
+      }
+      const source = fs.readFileSync(full, 'utf8');
+      filesRead++;
+      for (const k of keys.secretsIn(rel, source, loadedBy)) secrets.push(k);
+      const pieces = PAGE_EXT.test(full) ? scriptsIn(source) : [{ code: source, line: 1 }];
+      for (const piece of pieces) {
+        try {
+          for (const f of sinksIn(parser, piece.code, full, piece.line, resolver)) findings.push(Object.assign({ file: rel }, f));
+        } catch (err) {
+          unreadable.push({ file: rel + (piece.line > 1 ? ':' + piece.line : ''), why: 'could not be parsed: ' + String(err.message).split('\n')[0].slice(0, 120) });
+        }
+      }
+      if (/\.(vue|html)$/i.test(full)) {
+        for (const v of vHtmlIn(source)) {
+          findings.push({ file: rel, line: v.line, sink: 'v-html', expression: v.expression, origin: 'unknown' });
+        }
       }
     }
   }
-  return { ran: true, filesRead: filesRead, findings: secrets.concat(findings.map(describe)), unreadable: unreadable };
 }
 
 const ORIGIN_WORDS = {

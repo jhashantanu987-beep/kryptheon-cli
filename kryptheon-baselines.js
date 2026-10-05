@@ -166,6 +166,60 @@ function pruneLines(dropped) {
   return lines;
 }
 
+/**
+ * The last run of one recorded test, from the run history: whether it
+ * passed, and where it broke if it did not. Null when it has never run.
+ */
+function lastRunOf(historyFile, key) {
+  let lines = [];
+  try {
+    lines = fs.readFileSync(historyFile, 'utf8').split('\n').filter(Boolean);
+  } catch (e) {
+    return null;
+  }
+  const spec = specOf(key);
+  const title = titleOf(key);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let entry;
+    try {
+      entry = JSON.parse(lines[i]);
+    } catch (e) {
+      continue;
+    }
+    const test = (entry.tests || []).find((t) => t && t.title === title && specOf(t.specFile) === spec);
+    if (test) return { status: test.status, at: entry.runAt, failure: test.failure || null };
+  }
+  return null;
+}
+
+/**
+ * What accept says when there is nothing it can take, from the last run.
+ *
+ * Found on a blind test (HelixOps): a step was broken on purpose, and accept
+ * answered "it last matched its saved result" - the opposite of what had
+ * happened. accept only takes a run that went all the way through and ended
+ * on a different page; a step that no longer matches is a changed flow or a
+ * broken app, and neither is accepted.
+ */
+function nothingToAcceptLines(name, last) {
+  if (last && last.status === 'failed') {
+    const failure = last.failure || {};
+    const where = failure.line ? ' at line ' + failure.line + (failure.file ? ' of ' + specOf(failure.file) : '') : '';
+    const what = failure.plainLanguage ? ' (' + String(failure.plainLanguage).replace(/\.$/, '') + ')' : '';
+    return [
+      '"' + name + '" has nothing to accept: its last run broke' + where + ', before the end' + what + '.',
+      'accept only covers a run that went all the way through and finished on a different page - ' +
+        'a new address or a new title.',
+      'A step that no longer matches cannot be accepted. If the flow changed on purpose, record it ' +
+        'again (npx kryptheon record). If it did not, the app broke, and npx kryptheon check says what to fix.',
+    ];
+  }
+  if (last && last.status === 'passed') {
+    return ['"' + name + '" has no new result waiting.', 'Nothing to accept - its last run matched its saved result.'];
+  }
+  return ['"' + name + '" has no new result waiting.', 'Nothing to accept - no run has finished on a different page.'];
+}
+
 module.exports = {
   specOf: specOf,
   titleOf: titleOf,
@@ -173,4 +227,6 @@ module.exports = {
   classifyBaselines: classifyBaselines,
   pruneBaselines: pruneBaselines,
   pruneLines: pruneLines,
+  lastRunOf: lastRunOf,
+  nothingToAcceptLines: nothingToAcceptLines,
 };

@@ -412,7 +412,7 @@ function riskyParts(node, scope, code, aliases, out, depth) {
     }
   }
   const text = code.slice(node.start, node.end).replace(/\s+/g, ' ').slice(0, 80);
-  if (!out.some((p) => p.text === text)) out.push({ text: text, origin: origin });
+  if (!out.some((p) => p.text === text)) out.push({ text: text, origin: origin, line: node.loc ? node.loc.start.line : null });
 }
 
 function rootIdentifier(node) {
@@ -684,7 +684,89 @@ function checkedFirst(p, value, code) {
   return false;
 }
 
-function sinksIn(parser, code, file, lineOffset) {
+/**
+ * The helper a value is the result of: a call to a function this file
+ * declares, or one it imports from a file of the project. Its returns, each
+ * with its scope and its file's code, and the line where the first of them
+ * that is not plain text is built. Null for anything else - an import from a
+ * package, a default export, a function that cannot be found.
+ */
+function helperOf(value, scope, code, file, lineOffset, resolver) {
+  if (!value || !/CallExpression$/.test(value.type) || !value.callee || value.callee.type !== 'Identifier' || !scope) return null;
+  const name = value.callee.name;
+  let fnPath = localFunction(name, scope);
+  let helper = { code: code, file: null, lineOffset: lineOffset };
+  if (!fnPath) {
+    const binding = scope.getBinding(name);
+    const spec = binding && binding.kind === 'module' && binding.path && binding.path.node;
+    if (!spec || spec.type !== 'ImportSpecifier' || !resolver) return null;
+    const from = binding.path.parentPath && binding.path.parentPath.node.source && binding.path.parentPath.node.source.value;
+    const imported = spec.imported && (spec.imported.name || spec.imported.value);
+    const found = from && imported ? resolver(file, from, imported) : null;
+    if (!found) return null;
+    fnPath = found.fnPath;
+    helper = { code: found.code, file: found.file, lineOffset: 1 };
+  }
+  const returns = returnsOf(fnPath);
+  if (!returns.length) return null;
+  const risky = returns.find((r) => classify(r.node, r.scope, helper.code, 0) !== 'safe') || returns[0];
+  return {
+    fn: name,
+    file: helper.file,
+    line: (risky.node.loc ? risky.node.loc.start.line : 1) + helper.lineOffset - 1,
+    code: helper.code,
+    lineOffset: helper.lineOffset,
+    returns: returns,
+  };
+}
+
+/**
+ * Finds a function another file of the project exports, for helperOf. Parsed
+ * once a file; its functions are handed to the map() reader each time, since
+ * that table is rebuilt for every file read.
+ */
+function importResolver(parser, root) {
+  const parsed = new Map();
+  const EXTS = ['', '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '/index.js', '/index.ts'];
+  return (fromFile, source, name) => {
+    if (!/^\.\.?\//.test(source)) return null;
+    const base = path.resolve(path.dirname(fromFile), source);
+    const full = EXTS.map((ext) => base + ext).find((candidate) => {
+      try {
+        return fs.statSync(candidate).isFile() && CODE_EXT.test(candidate);
+      } catch (err) {
+        return false;
+      }
+    });
+    if (!full) return null;
+    if (!parsed.has(full)) {
+      let entry = null;
+      try {
+        if (fs.statSync(full).size <= MAX_BYTES) {
+          const code = fs.readFileSync(full, 'utf8');
+          const ast = parser.babelParse(code, full, true);
+          const fns = [];
+          let program = null;
+          parser.traverse(ast, {
+            Program(p) { program = p.scope; },
+            Function(p) { fns.push(p); },
+          });
+          entry = { code: code, program: program, fns: fns, file: path.relative(root, full).split(path.sep).join('/') };
+        }
+      } catch (err) {
+        entry = null;
+      }
+      parsed.set(full, entry);
+    }
+    const entry = parsed.get(full);
+    if (!entry || !entry.program) return null;
+    for (const p of entry.fns) FN_PATHS.set(p.node, p);
+    const fnPath = localFunction(name, entry.program);
+    return fnPath ? { fnPath: fnPath, code: entry.code, file: entry.file } : null;
+  };
+}
+
+function sinksIn(parser, code, file, lineOffset, resolver) {
   const found = [];
   const ast = parser.babelParse(code, file, true);
   const lineOf = (node) => (node.loc ? node.loc.start.line : 1) + lineOffset - 1;
@@ -702,6 +784,25 @@ function sinksIn(parser, code, file, lineOffset) {
     const param = paramOf(value, scope);
     if (param) {
       viaHelper.push({ node: node, sink: sink, value: value, scope: scope, param: param });
+      return;
+    }
+    // The HTML built by a helper - root.innerHTML = renderBoard(rows) - is
+    // judged by what the helper returns, in its own file, and the place it
+    // puts a value in is named. Found on a blind test (HelixOps): appShell(),
+    // a fixed string in ui.js, was reported as unknown, and renderBoard() was
+    // reported at its call with no word of ui.js:13, where the title goes in.
+    const built = helperOf(value, scope, code, file, lineOffset, resolver);
+    if (built) {
+      const origin = worst(built.returns.map((r) => classify(r.node, r.scope, built.code, 0)));
+      if (origin === 'safe') return;
+      const parts = [];
+      for (const r of built.returns) riskyParts(r.node, r.scope, built.code, undefined, parts, 0);
+      // The line of the first value that goes in, not of the return around it.
+      const first = parts.find((p) => p.line);
+      found.push({
+        line: lineOf(node), sink: sink, expression: textOf(value), origin: origin, parts: parts,
+        helper: { fn: built.fn, file: built.file, line: first ? first.line + built.lineOffset - 1 : built.line },
+      });
       return;
     }
     const origin = classify(value, scope, code, 0);
@@ -834,6 +935,7 @@ function scanProject(root, options) {
     }
   }
   const loadedBy = keys.scriptsLoadedBy(pages);
+  const resolver = importResolver(parser, root);
   for (const full of files) {
     let size = 0;
     try {
@@ -852,7 +954,7 @@ function scanProject(root, options) {
     const pieces = PAGE_EXT.test(full) ? scriptsIn(source) : [{ code: source, line: 1 }];
     for (const piece of pieces) {
       try {
-        for (const f of sinksIn(parser, piece.code, full, piece.line)) findings.push(Object.assign({ file: rel }, f));
+        for (const f of sinksIn(parser, piece.code, full, piece.line, resolver)) findings.push(Object.assign({ file: rel }, f));
       } catch (err) {
         unreadable.push({ file: rel + (piece.line > 1 ? ':' + piece.line : ''), why: 'could not be parsed: ' + String(err.message).split('\n')[0].slice(0, 120) });
       }
@@ -931,9 +1033,14 @@ function describe(f) {
   if (f.kind === 'redirect') return describeRedirect(f);
   const severity = f.origin === 'unknown' ? 'MEDIUM' : 'HIGH';
   const how = f.sink === 'v-html' ? 'v-html' : f.sink;
+  // Where the helper builds it: its own file when it is another one.
+  const builtAt = f.helper ? (f.helper.file ? f.helper.file + ':' : 'line ') + f.helper.line : '';
   const where = f.via
     ? 'In ' + f.file + ' at line ' + f.line + ', this value is passed to ' + f.via.fn + '(), which puts ' +
       'what it is given into the page as HTML with ' + how + ' at line ' + f.via.line + ':'
+    : f.helper
+    ? 'In ' + f.file + ' at line ' + f.line + ', the HTML that ' + f.helper.fn + '() builds - at ' + builtAt +
+      ' - is put into the page with ' + how + ':'
     : 'In ' + f.file + ' at line ' + f.line + ', this value is put into the page as HTML with ' + how + ':';
   // The fix for a helper is different, and getting it wrong breaks the page:
   // switching the helper to textContent makes every other call - the ones
@@ -945,6 +1052,12 @@ function describe(f) {
         'and they would show their tags as text. Fix it here instead - escape the dynamic part of ' +
         'this value before it is joined into the HTML (replace & < > " \' with their HTML entities), ' +
         'or pass it through a sanitizer such as DOMPurify if it must keep some formatting.',
+    ]
+    : f.helper
+    ? [
+      'Fix it inside ' + f.helper.fn + '() at ' + builtAt + ', where the values are joined into the HTML: ' +
+        'escape each dynamic value there (replace & < > " \' with their HTML entities), or pass the ' +
+        'result through a sanitizer such as DOMPurify if it must keep some formatting.',
     ]
     : [
       'Fix it so the value is always shown as text: set textContent instead of innerHTML for the ' +
@@ -993,9 +1106,11 @@ function describe(f) {
     origin: f.origin,
     parts: (f.parts || []).map((p) => ({ text: p.text, origin: p.origin })),
     via: f.via || null,
+    helper: f.helper || null,
     headline: 'Text ' + (f.origin === 'unknown' ? 'of unknown origin' : ORIGIN_WORDS[f.origin].split(',')[0]) +
       ' is inserted as HTML in ' + f.file + ':' + f.line +
-      (f.via ? ' (through ' + f.via.fn + '() at line ' + f.via.line + ')' : '') + '.',
+      (f.via ? ' (through ' + f.via.fn + '() at line ' + f.via.line + ')' : '') +
+      (f.helper ? ', built by ' + f.helper.fn + '() at ' + builtAt : '') + '.',
     fixPrompt: fixPrompt,
   };
 }

@@ -199,6 +199,35 @@ const APP = {
     '</body></html>',
   ].join('\n'),
   'src/Note.vue': '<template><div v-html="note.body"></div><p v-html="\'<b>fixed</b>\'"></p></template>\n',
+  // HTML built by helpers in another file. Found on a blind test (HelixOps):
+  // root.innerHTML = appShell() - a fixed string in ui.js - was reported, and
+  // renderBoard() was reported at its call with no word of ui.js:13.
+  'src/shell.js': [
+    'export function appShell() {',
+    '  return `<header><b>App</b></header>',
+    '  <main id="board"></main>`;',
+    '}',
+    "export const footer = () => '<footer>fixed</footer>';",
+    'export function renderCards(rows) {',
+    '  return rows.map(r => `<article>',
+    '    <h3>${r.title}</h3>',                                                    // 8 where the title goes in
+    '  </article>`).join("");',
+    '}',
+    'export function renderSafe(rows) {',
+    '  return rows.map(r => `<li>${escapeHtml(r.title)}</li>`).join("");',
+    '}',
+  ].join('\n'),
+  'src/board.js': [
+    "import { appShell, footer, renderCards, renderSafe } from './shell.js';",
+    "import { renderVendor } from 'some-package';",
+    "function localShell() { return '<div>local</div>'; }",
+    'root.innerHTML = appShell();',                                               // 4 fixed: not reported
+    'foot.innerHTML = footer();',                                                 // 5 fixed: not reported
+    'board.innerHTML = renderCards(rows);',                                       // 6 reported, built at shell.js:8
+    'list.innerHTML = renderSafe(rows);',                                         // 7 escaped: not reported
+    'mid.innerHTML = localShell();',                                              // 8 fixed: not reported
+    'pkg.innerHTML = renderVendor(rows);',                                        // 9 a package's: reported as before
+  ].join('\n'),
   'node_modules/lib/x.js': 'a.innerHTML = `${evil}`;\n',
   'src/vendor.min.js': 'a.innerHTML=`${evil}`;\n',
   'src/broken.js': 'function (( {\n',
@@ -216,6 +245,31 @@ const at = (file, line) => result.findings.find((f) => f.file === file && f.line
 const listFiles = result.findings.map((f) => f.file + ':' + f.line + ' ' + f.origin).join(', ');
 
 check('it ran with the parser Playwright ships', result.ran ? [] : ['it did not run: ' + result.why]);
+
+check('HTML a helper in another file builds is judged there: a fixed string is not reported', (() => {
+  const p = [];
+  for (const line of [4, 5, 7, 8]) {
+    const f = at('src/board.js', line);
+    if (f) p.push('board.js:' + line + ' reported: ' + f.headline);
+  }
+  return p;
+})());
+
+check('and HTML a helper builds from a value names the helper\'s line where the value goes in', (() => {
+  const f = at('src/board.js', 6);
+  if (!f) return ['board.js:6 not found; found: ' + listFiles];
+  const p = [];
+  if (!f.helper || f.helper.fn !== 'renderCards' || f.helper.file !== 'src/shell.js' || f.helper.line !== 8) p.push('helper ' + JSON.stringify(f.helper));
+  if (f.headline !== 'Text of unknown origin is inserted as HTML in src/board.js:6, built by renderCards() at src/shell.js:8.') p.push(f.headline);
+  if (!(f.parts || []).some((x) => x.text === 'r.title')) p.push('parts ' + JSON.stringify(f.parts));
+  const prompt = f.fixPrompt.replace(/\s+/g, ' ');
+  if (prompt.indexOf('Fix it inside renderCards() at src/shell.js:8') < 0) p.push('prompt: ' + prompt);
+  // A helper from a package cannot be read: reported where it is used, as before.
+  const pkg = at('src/board.js', 9);
+  if (!pkg) p.push('a package helper was dropped');
+  else if (pkg.helper) p.push('a package helper was named: ' + JSON.stringify(pkg.helper));
+  return p;
+})());
 
 check('a server response inserted as HTML is found, and ranked HIGH', (() => {
   const f = at('src/list.js', 4);
@@ -451,6 +505,7 @@ check('exactly the expected findings, no more', (() => {
     'src/list.js:15', 'src/list.js:17', 'src/list.js:21', 'src/list.js:18', 'src/list.js:19', 'src/list.js:4', 'src/list.js:9',
     'src/origins.js:7', 'src/origins.js:12', 'src/origins.js:15', 'src/origins.js:16', 'src/origins.js:18', 'src/origins.js:20', 'src/origins.js:21',
     'src/redirects.js:2', 'src/redirects.js:3', 'src/redirects.js:6', 'src/redirects.js:8', 'src/redirects.js:10', 'src/redirects.js:11', 'src/redirects.js:13',
+    'src/board.js:6', 'src/board.js:9',
   ];
   const got = result.findings.map((f) => f.file + ':' + f.line).sort();
   return JSON.stringify(got) === JSON.stringify(want.sort()) ? [] : ['expected ' + JSON.stringify(want) + '\n        got      ' + JSON.stringify(got)];

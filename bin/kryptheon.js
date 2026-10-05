@@ -2659,8 +2659,22 @@ function accept(name) {
 
   console.error('');
   if (result.reason === 'nothing-pending') {
-    console.error('  "' + titleOf(key) + '" has no new result waiting.');
-    console.error('  Nothing to accept - it last matched its saved result.');
+    // Said from the last run of this test, not assumed: a run that broke on
+    // a step is not one that matched (see baselines.nothingToAcceptLines).
+    const last = baselines.lastRunOf(store.pathsFor(USER_DIR).history, key);
+    baselines.nothingToAcceptLines(titleOf(key), last).forEach((paragraph, i) => {
+      if (i) console.error('');
+      let current = '';
+      for (const word of paragraph.split(' ')) {
+        if ((current + ' ' + word).trim().length > 72) {
+          console.error('  ' + current.trim());
+          current = word;
+        } else {
+          current = (current + ' ' + word).trim();
+        }
+      }
+      if (current) console.error('  ' + current);
+    });
   } else if (result.reason === 'no-entry') {
     console.error('  "' + titleOf(key) + '" has no saved result yet.');
   } else {

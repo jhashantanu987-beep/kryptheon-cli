@@ -238,6 +238,62 @@ try {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// A secret in a format nobody publishes, named as one. Found on a blind test
+// (HarborLine): api.js held a replay signing key and nothing was said. Made up
+// at run time, like every key above.
+const REPLAY = 'hl_' + 'replay_' + '8JQ4-2RKP-7M4T-9PX3';
+const CLIENT = 'cs' + '_' + tail(22);
+const HOOK = 'whsec' + '-' + tail(18);
+const NAMED = {
+  'src/api.js': [
+    'const DEMO = localStorage.getItem("x");',                          // 1 browser code
+    'export function cfg() {',                                          // 2
+    "  const replaySigningKey = '" + REPLAY + "';",                    // 3 reported
+    '  return { clientSecret: "' + CLIENT + '", region: "na" };',      // 4 reported, as a property
+    '}',                                                                // 5
+    'const webhook_secret = `' + HOOK + '`;',                           // 6 reported, snake case
+    "const anonApiKey = 'anon_" + tail(20) + "';",                      // 7 public by design, though it ends like a secret
+    "const public_api_key = 'pub_" + tail(20) + "';",                   // 8 public by design, though it ends like a secret
+    "const apiKey = 'YOUR_API_KEY_1234567890';",                       // 9 a placeholder
+    "const passwordHint = 'remember 2024 and 1234';",                  // 10 not a secret's name; spaces
+    "const accessToken = 'https://api.acme.io/v1/t0k3n9';",            // 11 an address, not a secret
+    "const signingKey = 'aaaaaaaaaaaaaaaaaaaaaaaa';",                  // 12 no digits
+    'const apiKey2 = process.env.API_KEY;',                             // 13 not written in
+    "const secretLabel = 'Secret key 1234567890';",                    // 14 a label, with spaces
+  ].join('\n'),
+  'src/api.test.js': "const replaySigningKey = '" + REPLAY + "';\n", // a test ships nothing
+  'server/jobs.js': "const encryption_key = 'k1" + tail(20) + "';\n", // server code: MEDIUM
+};
+const namedDir = project(NAMED);
+try {
+  const result = code.scanProject(namedDir);
+  const found = result.findings.filter((f) => f.kind === 'secret-in-code');
+  check('11. a secret in an unknown format is reported by its name, as unconfirmed, and never printed', (() => {
+    const problems = [];
+    const where = found.map((f) => f.file + ':' + f.line).sort();
+    const want = ['server/jobs.js:1', 'src/api.js:3', 'src/api.js:4', 'src/api.js:6'];
+    if (JSON.stringify(where) !== JSON.stringify(want)) problems.push('reported ' + JSON.stringify(where) + ', want ' + JSON.stringify(want));
+    for (const f of found) {
+      if (f.confidence !== 'medium') problems.push(f.file + ':' + f.line + ' confidence ' + f.confidence);
+      const text = f.headline + ' ' + f.fixPrompt + ' ' + f.expression;
+      if ([REPLAY, CLIENT, HOOK].some((k) => text.includes(k))) problems.push(f.file + ':' + f.line + ' printed the secret');
+    }
+    const replay = found.find((f) => f.file === 'src/api.js' && f.line === 3);
+    if (replay) {
+      if (replay.severity !== 'HIGH') problems.push('browser code: severity ' + replay.severity);
+      if (!/^What looks like a secret \("replaySigningKey"\) is written into src\/api\.js:3, and it reaches the browser\.$/.test(replay.headline)) problems.push('headline: ' + replay.headline);
+      if (!/check whether it is a real one/.test(replay.fixPrompt.replace(/\s+/g, ' '))) problems.push('the prompt does not say it is unconfirmed');
+    }
+    const server = found.find((f) => f.file === 'server/jobs.js');
+    if (server && server.severity !== 'MEDIUM') problems.push('server code: severity ' + server.severity);
+    return problems;
+  })());
+} catch (err) {
+  check('11. the read ran', ['it threw: ' + err.stack]);
+} finally {
+  fs.rmSync(namedDir, { recursive: true, force: true });
+}
+
 let failures = 0;
 for (const r of results) {
   if (r.problems.length) {

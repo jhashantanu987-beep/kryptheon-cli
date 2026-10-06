@@ -101,6 +101,23 @@ function looksLikeServiceRoleKey(value) {
   return (value.match(/[0-9]/g) || []).length >= 4;
 }
 
+// A quoted value given to something named as a secret, in a format this does
+// not know. Found on a blind test (HarborLine): api.js held
+// `const replaySigningKey = 'hl_replay_8JQ4-...'` in code every visitor
+// downloads, and the read named nothing - it knew only famous formats. The
+// name says what it is meant to be; the value has to look like one too:
+// long, letters and digits, no spaces, not a placeholder. Names that are
+// public by design (anon, publishable, public) are left alone.
+const NAMED_SECRET = /\b([A-Za-z_$][\w$]*)\s*[:=]\s*(["'`])([^"'`\s]{16,})\2/g;
+const SECRET_NAME = /(secret|signingkey|privatekey|apikey|accesstoken|authtoken|refreshtoken|password|passwd|clientsecret|webhooksecret|encryptionkey|hmackey)$/;
+function looksLikeNamedSecret(name, value) {
+  const bare = name.toLowerCase().replace(/[_$]/g, '');
+  if (!SECRET_NAME.test(bare) || /anon|publishable|public/.test(bare)) return false;
+  if (/your|example|placeholder|changeme|x{4,}|here|dummy|redacted|<|\$\{/i.test(value)) return false;
+  if (/^(https?:|\/|\.)/i.test(value) || /^eyJ/.test(value)) return false; // an address or a path; JWTs are read above
+  return (value.match(/[0-9]/g) || []).length >= 3 && (value.match(/[A-Za-z]/g) || []).length >= 3;
+}
+
 /** First characters and length - enough to find it, too little to use it. */
 function masked(value) {
   return value.slice(0, 6) + '... (' + value.length + ' characters, not shown)';
@@ -290,6 +307,22 @@ function secretsIn(rel, source, loadedBy) {
       opens: SUPABASE_OPENS + ' Its format is not one I know, so check whether it is a real key.',
       rotate: SUPABASE_ROTATE,
       instead: SUPABASE_INSTEAD,
+    }, 'medium');
+  }
+
+  // Never in a test, whose secrets are made up for it and ship nowhere.
+  const inTest = /(^|\/)__tests__\/|\.(test|spec|check)\.[cm]?[jt]sx?$/i.test(rel);
+  NAMED_SECRET.lastIndex = 0;
+  let s;
+  while (!inTest && (s = NAMED_SECRET.exec(source))) {
+    if (!looksLikeNamedSecret(s[1], s[3])) continue;
+    add(s.index + s[0].indexOf(s[3]), s[3], {
+      label: 'secret ("' + s[1] + '")',
+      opens: 'Its name says it is a secret, and whoever has it can do whatever it signs or unlocks. ' +
+        'Its format is not one I know, so check whether it is a real one.',
+      rotate: 'wherever it was issued, issue a new one and revoke this one',
+      instead: 'a call to your own server, which holds the secret',
+      severity: runs.browser ? 'HIGH' : 'MEDIUM',
     }, 'medium');
   }
 
